@@ -31,6 +31,8 @@
   function getAIConfig() {
     var s = getSettings();
     var truthy = function (v) { return v === true || v === '1' || v === 1; };
+    var base = String(s.llmBaseUrl || '').trim();
+    if (!base) base = s.llmProvider === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.deepseek.com';
     return {
       ocrEnabled: truthy(s.ocrEnabled),
       ocrSecretId: s.ocrSecretId || '',
@@ -38,8 +40,9 @@
       ocrRegion: s.ocrRegion || 'ap-guangzhou',
       llmEnabled: truthy(s.llmEnabled),
       llmApiKey: s.llmApiKey || '',
-      llmBaseUrl: String(s.llmBaseUrl || 'https://api.deepseek.com').replace(/\/+$/, ''),
-      llmModel: s.llmModel || 'deepseek-chat'
+      llmBaseUrl: base.replace(/\/+$/, ''),
+      llmModel: s.llmModel || (s.llmProvider === 'anthropic' ? 'claude-sonnet-4-5' : 'deepseek-chat'),
+      llmProvider: s.llmProvider === 'anthropic' ? 'anthropic' : 'openai'
     };
   }
 
@@ -155,10 +158,48 @@
   }
 
   // 通用 chat 方法：messages = [{role, content}]，返回 content 字符串
+  // 支持 OpenAI 兼容（/chat/completions）与 Anthropic（/v1/messages）两种协议
   function llmChat(messages, opts) {
     if (!isConfigured('llm')) return Promise.reject(new Error('大模型未配置'));
     var cfg = getAIConfig();
     var o = opts || {};
+
+    if (cfg.llmProvider === 'anthropic') {
+      // ---------- Anthropic Messages API ----------
+      var system = '';
+      var conv = [];
+      (messages || []).forEach(function (msg) {
+        if (msg.role === 'system') system += (system ? '\n' : '') + msg.content;
+        else conv.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', content: msg.content });
+      });
+      if (!conv.length) conv.push({ role: 'user', content: system || '.' });
+      var base = cfg.llmBaseUrl.replace(/\/v1\/?$/, '');
+      return fetch(base + '/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': cfg.llmApiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body: JSON.stringify({
+          model: cfg.llmModel,
+          max_tokens: o.maxTokens || 1200,
+          system: system || undefined,
+          messages: conv
+        })
+      }).then(function (res) {
+        if (!res.ok) throw new Error('Anthropic 请求失败: HTTP ' + res.status);
+        return res.json();
+      }).then(function (data) {
+        if (data.type === 'error') throw new Error('Anthropic 错误: ' + (data.error && data.error.message));
+        var text = (data.content || []).map(function (b) { return b.text || ''; }).join('');
+        if (!text) throw new Error('Anthropic 返回为空');
+        return text;
+      });
+    }
+
+    // ---------- OpenAI 兼容 ----------
     return fetch(cfg.llmBaseUrl + '/chat/completions', {
       method: 'POST',
       headers: {

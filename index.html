@@ -17,6 +17,7 @@
   <script src="ai.js"></script>
   <script src="recon.js"></script>
   <script src="report.js"></script>
+  <script src="parser.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -51,14 +52,14 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </div>
-            <div class="upload-title">拖拽上传 PDF / OFD / 图片发票</div>
-            <div class="upload-hint">手机拍照直接上传，AI 自动识别</div>
+            <div class="upload-title">拖拽上传 发票 / 表格 / Word / PDF / 图片</div>
+            <div class="upload-hint">发票拍照或文件直传，AI 自动识别；Excel/Word 表格自动映射入台账</div>
             <button class="btn btn-primary" id="ledgerSelectBtn">选择文件</button>
-            <input type="file" id="ledgerFileInput" accept=".pdf,.ofd,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden>
+            <input type="file" id="ledgerFileInput" accept=".pdf,.ofd,.jpg,.jpeg,.png,.webp,.bmp,.xlsx,.xls,.csv,.docx" multiple hidden>
           </div>
           <div class="upload-tips">
-            <p>支持 PDF、OFD 电子发票，以及手机拍照的 JPG/PNG 图片</p>
-            <p>图片识别需在设置中开启腾讯云 OCR；文件仅在浏览器本地处理</p>
+            <p>发票：PDF / OFD / 拍照图片；表格：Excel / CSV / Word（.docx）自动识别列并映射</p>
+            <p>图片识别需在设置中开启 OCR；文件仅在浏览器本地处理</p>
           </div>
           <button class="btn btn-ghost btn-block" id="loadDemoBtn">加载演示数据</button>
         </aside>
@@ -432,23 +433,29 @@
         </div>
 
         <div class="settings-section">
-          <div class="settings-title">大模型字段纠错（可选）</div>
+          <div class="settings-title">外部 AI 服务（可选，Key 自填）</div>
           <label class="form-item">启用大模型
             <select id="setLlmEnabled">
               <option value="0">关闭</option>
               <option value="1">开启</option>
             </select>
           </label>
+          <label class="form-item">接口类型
+            <select id="setLlmProvider">
+              <option value="openai">OpenAI 兼容（DeepSeek/混元/通义…）</option>
+              <option value="anthropic">Anthropic（Claude）</option>
+            </select>
+          </label>
           <label class="form-item">接口地址（Base URL）
             <input type="text" id="setLlmBaseUrl" placeholder="https://api.deepseek.com">
           </label>
           <label class="form-item">模型名称
-            <input type="text" id="setLlmModel" placeholder="deepseek-chat">
+            <input type="text" id="setLlmModel" placeholder="deepseek-chat / claude-sonnet-4-5">
           </label>
           <label class="form-item form-full">API Key
-            <input type="password" id="setLlmApiKey" placeholder="大模型服务商 API Key">
+            <input type="password" id="setLlmApiKey" placeholder="你自己申请的 API Key（仅存本机）">
           </label>
-          <p class="settings-tip">支持 OpenAI 兼容接口（DeepSeek / 腾讯混元 / 通义千问等）。开启后每次识别会用大模型校验号码、金额、日期等字段，提升准确率。</p>
+          <p class="settings-tip">支持任意 OpenAI 兼容接口与 Anthropic（Claude）接口，Key 由你自己申请填写，仅保存在本机浏览器，不上传任何服务器。启用后，字段纠错 / 文字报告 / 流水归类会调用该接口并发送相关数据到对应服务商（其余功能零上传）。</p>
         </div>
 
         <div class="modal-hint">密钥仅保存在本机浏览器 localStorage，不会上传到任何服务器。OCR/大模型调用产生的费用由对应服务商按量计费。</div>
@@ -456,6 +463,29 @@
       <div class="modal-footer">
         <button class="btn" id="settingsCancelBtn">取消</button>
         <button class="btn btn-primary" id="settingsSaveBtn">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="importModal" hidden>
+    <div class="modal-box modal-wide">
+      <div class="modal-header">
+        <span class="modal-title">表格导入预览</span>
+        <button class="modal-close" id="importCloseBtn">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="import-tip" id="importTip"></div>
+        <div class="import-map-title">列映射（自动识别，可手动调整）</div>
+        <div class="import-map" id="importMap"></div>
+        <div class="import-map-title">数据预览（前 5 行）</div>
+        <div class="import-preview">
+          <table class="import-table" id="importPreviewTable"></table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="import-footnote">金额/日期已自动容错；导入后仍可在台账中编辑修正</span>
+        <button class="btn" id="importCancelBtn">取消</button>
+        <button class="btn btn-primary" id="importConfirmBtn">确认导入</button>
       </div>
     </div>
   </div>

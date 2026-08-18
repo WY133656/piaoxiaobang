@@ -544,7 +544,52 @@ async function extractInvoiceText(file) {
   return extractPdfText(file);
 }
 
+/* ============================================================
+ * 四格式统一导入：发票路径（PDF/OFD/图片）+ 表格路径（Excel/CSV/Word）
+ * 独立：每个模块自带导入入口；联动：导入结果统一写入共享台账
+ * ============================================================ */
+
+// 表格导入预览弹窗的映射字段（UI 展示用）
+const IMPORT_FIELDS = [
+  { key: 'date', label: '开票日期' },
+  { key: 'number', label: '发票号码' },
+  { key: 'amount', label: '金额（不含税）' },
+  { key: 'tax', label: '税额' },
+  { key: 'total', label: '价税合计' },
+  { key: 'counterparty', label: '销售方/供应商' },
+  { key: 'category', label: '费用分类' },
+  { key: 'type', label: '发票类型' },
+  { key: 'summary', label: '摘要/备注' }
+];
+
+let importContext = null; // { rows, headerRow, fileName, onDone }
+
 async function handleLedgerFiles(files) {
+  const list = Array.from(files);
+  const tableFiles = list.filter(f => /\.(xlsx|xls|csv|docx)$/i.test(f.name));
+  const invoiceFiles = list.filter(f => !/\.(xlsx|xls|csv|docx)$/i.test(f.name));
+
+  if (invoiceFiles.length) await processInvoiceFiles(invoiceFiles);
+  let tableOk = 0, tableFail = 0;
+  for (const f of tableFiles) {
+    try {
+      if (await importTableFile(f)) tableOk++;
+      else tableFail++; // 用户取消
+    } catch (err) {
+      console.error('表格导入失败:', f.name, err);
+      showToast('导入失败: ' + f.name + '（' + err.message + '）', 'error');
+      tableFail++;
+    }
+  }
+  if (tableFiles.length) {
+    if (tableOk > 0) {
+      showToast('表格导入完成: ' + tableOk + ' 个文件成功' + (tableFail > 0 ? '，' + tableFail + ' 个失败/取消' : ''), tableFail > 0 ? 'error' : 'success');
+    }
+  }
+}
+
+// 发票路径（PDF/OFD/图片 → 文本 → 规则解析 → OCR 兜底 → 大模型纠错）
+async function processInvoiceFiles(files) {
   showLoading('正在识别发票 (' + files.length + ' 个文件)...');
   let success = 0, fail = 0, ocrCount = 0, llmCount = 0;
   for (let i = 0; i < files.length; i++) {
@@ -621,6 +666,150 @@ async function handleLedgerFiles(files) {
   } else {
     showToast('未能从文件中提取发票信息（可尝试在设置中开启 OCR）', 'error');
   }
+}
+
+// 表格文件 → 解析 → 预览确认 → 入台账；返回 true=已导入，false=取消
+async function importTableFile(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  let rows = null;
+  if (ext === 'docx') {
+    const buf = await readFileAsArrayBuffer(file);
+    const zip = await JSZip.loadAsync(buf);
+    const entry = zip.file('word/document.xml');
+    if (!entry) throw new Error('不是有效的 Word 文档');
+    const xml = await entry.async('text');
+    const doc = Parser.parseDocxXml(xml);
+    const tables = (doc.tables || []).slice().sort((a, b) => b.length - a.length);
+    rows = (tables.length && tables[0].length > 1)
+      ? tables[0]
+      : Parser.textToRows((doc.paragraphs || []).join('\n'));
+  } else {
+    const buf = await readFileAsArrayBuffer(file);
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    if (!ws) throw new Error('表格为空');
+    rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  }
+  const parsed = Parser.mapColumnsToRecords(rows);
+  if (!parsed.records.length) throw new Error('未识别到有效数据（表头需含 日期/金额 等列）');
+  return new Promise(resolve => openImportPreview(rows, parsed, file.name, resolve));
+}
+
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('文件读取失败'));
+    r.readAsArrayBuffer(file);
+  });
+}
+
+// 打开导入预览弹窗：列映射 + 前几行预览，onDone(true/false)
+function openImportPreview(rows, parsed, fileName, onDone) {
+  importContext = { rows, headerRow: parsed.headerRow, fileName, onDone };
+  $('importTip').textContent = '文件「' + fileName + '」识别到 ' + parsed.records.length + ' 条数据。确认列映射后点击"确认导入"写入台账。';
+  renderImportMapUI(rows, parsed.headerRow, parsed.mapping);
+  renderImportPreviewTable(rows, parsed.headerRow);
+  $('importModal').hidden = false;
+}
+
+function renderImportMapUI(rows, headerRow, mapping) {
+  const headers = headerRow >= 0 ? (rows[headerRow] || []) : [];
+  const box = $('importMap');
+  box.innerHTML = '';
+  const fieldToCol = {};
+  Object.keys(mapping || {}).forEach(ci => { fieldToCol[mapping[ci]] = Number(ci); });
+  IMPORT_FIELDS.forEach(f => {
+    const row = document.createElement('div');
+    row.className = 'import-map-row';
+    const label = document.createElement('span');
+    label.className = 'import-map-label';
+    label.textContent = f.label;
+    const sel = document.createElement('select');
+    sel.className = 'import-map-select';
+    sel.dataset.field = f.key;
+    const none = document.createElement('option');
+    none.value = '-1';
+    none.textContent = '（不导入）';
+    sel.appendChild(none);
+    headers.forEach((h, i) => {
+      const op = document.createElement('option');
+      op.value = String(i);
+      const name = (h === null || h === undefined || String(h).trim() === '') ? '第' + (i + 1) + '列' : String(h).trim();
+      op.textContent = name;
+      sel.appendChild(op);
+    });
+    if (fieldToCol[f.key] !== undefined) sel.value = String(fieldToCol[f.key]);
+    row.appendChild(label);
+    row.appendChild(sel);
+    box.appendChild(row);
+  });
+}
+
+function renderImportPreviewTable(rows, headerRow) {
+  const t = $('importPreviewTable');
+  t.innerHTML = '';
+  const start = headerRow >= 0 ? headerRow : 0;
+  const end = Math.min(rows.length, start + 6);
+  for (let i = start; i < end; i++) {
+    const tr = document.createElement('tr');
+    const r = rows[i] || [];
+    for (let j = 0; j < r.length; j++) {
+      const td = document.createElement(i === start ? 'th' : 'td');
+      td.textContent = r[j] === null || r[j] === undefined ? '' : String(r[j]);
+      tr.appendChild(td);
+    }
+    t.appendChild(tr);
+  }
+}
+
+// 确认导入：收集映射 → 重算 → 转台账 → 保存
+function importConfirmAction() {
+  if (!importContext) return;
+  const { rows, fileName, onDone } = importContext;
+  const mapping = {};
+  document.querySelectorAll('#importMap select').forEach(sel => {
+    const col = Number(sel.value);
+    if (col >= 0) mapping[col] = sel.dataset.field;
+  });
+  const parsed = Parser.mapColumnsToRecords(rows, { mapping });
+  if (!parsed.records.length) { showToast('没有可导入的数据行', 'error'); return; }
+  const added = parsed.records.map((r, idx) => {
+    const inv = {
+      number: r.number || '',
+      code: '',
+      date: r.date || '',
+      seller: r.counterparty || '',
+      buyer: '',
+      amount: (r.amount !== null && r.amount !== undefined) ? r.amount : '',
+      tax: (r.tax !== null && r.tax !== undefined) ? r.tax : '',
+      total: (r.total !== null && r.total !== undefined) ? r.total : '',
+      invoiceType: r.type || '',
+      summary: r.summary || '',
+      category: r.category || '',
+      fileName: fileName + (parsed.records.length > 1 ? ' 第' + (idx + 1) + '/' + parsed.records.length + '条' : '')
+    };
+    LC.enrichInvoice(inv, (inv.summary || '') + ' ' + (inv.seller || ''));
+    return inv;
+  });
+  state.ledger.push(...added);
+  closeImportModal();
+  saveLedgerNow().then(() => {
+    updateTotalCount();
+    renderLedger();
+    showToast('已导入 ' + added.length + ' 条记录到台账', 'success');
+  });
+  if (onDone) onDone(true);
+}
+
+function importCancelAction() {
+  closeImportModal();
+  if (importContext && importContext.onDone) importContext.onDone(false);
+}
+
+function closeImportModal() {
+  $('importModal').hidden = true;
+  importContext = null;
 }
 
 // 按「重命名后文件名」批量打包下载（仅含内存中有原始文件的发票）
@@ -1482,8 +1671,9 @@ function openSettings() {
   $('setOcrSecretId').value = s.ocrSecretId || '';
   $('setOcrSecretKey').value = s.ocrSecretKey || '';
   $('setLlmEnabled').value = s.llmEnabled ? '1' : '0';
-  $('setLlmBaseUrl').value = s.llmBaseUrl || 'https://api.deepseek.com';
-  $('setLlmModel').value = s.llmModel || 'deepseek-chat';
+  $('setLlmProvider').value = s.llmProvider === 'anthropic' ? 'anthropic' : 'openai';
+  $('setLlmBaseUrl').value = s.llmBaseUrl || (s.llmProvider === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.deepseek.com');
+  $('setLlmModel').value = s.llmModel || (s.llmProvider === 'anthropic' ? 'claude-sonnet-4-5' : 'deepseek-chat');
   $('setLlmApiKey').value = s.llmApiKey || '';
   $('settingsModal').hidden = false;
 }
@@ -1500,10 +1690,14 @@ function saveSettingsModal() {
     ocrSecretId: $('setOcrSecretId').value.trim(),
     ocrSecretKey: $('setOcrSecretKey').value.trim(),
     llmEnabled: $('setLlmEnabled').value === '1',
-    llmBaseUrl: $('setLlmBaseUrl').value.trim() || 'https://api.deepseek.com',
-    llmModel: $('setLlmModel').value.trim() || 'deepseek-chat',
+    llmProvider: $('setLlmProvider').value === 'anthropic' ? 'anthropic' : 'openai',
+    llmBaseUrl: $('setLlmBaseUrl').value.trim() || ($('setLlmProvider').value === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.deepseek.com'),
+    llmModel: $('setLlmModel').value.trim() || ($('setLlmProvider').value === 'anthropic' ? 'claude-sonnet-4-5' : 'deepseek-chat'),
     llmApiKey: $('setLlmApiKey').value.trim()
   });
+  if ($('setLlmEnabled').value === '1' && $('setLlmApiKey').value.trim()) {
+    showToast('AI 已启用：数据将发送到 ' + ($('setLlmProvider').value === 'anthropic' ? 'Anthropic' : '你配置的') + ' 服务商，其余功能仍本地处理', 'error');
+  }
   // 公司名变化 → 重算已有发票的「购买方非本公司」备注
   state.ledger.forEach(inv => {
     inv.remark = LC.buildRemark(inv);
@@ -1537,6 +1731,11 @@ function init() {
   setupUpload('ledgerUploadBox', 'ledgerSelectBtn', 'ledgerFileInput', handleLedgerFiles);
   setupUpload('dedupUploadBox', 'dedupSelectBtn', 'dedupFileInput', handleDedupFiles);
   setupUpload('mergeUploadBox', 'mergeSelectBtn', 'mergeFileInput', handleMergeFiles);
+
+  // 表格导入预览弹窗
+  $('importConfirmBtn').addEventListener('click', importConfirmAction);
+  $('importCancelBtn').addEventListener('click', importCancelAction);
+  $('importCloseBtn').addEventListener('click', importCancelAction);
 
   $('loadDemoBtn').addEventListener('click', loadDemoData);
   $('exportExcelBtn').addEventListener('click', exportLedgerExcel);
@@ -1596,6 +1795,17 @@ function init() {
   $('settingsSaveBtn').addEventListener('click', saveSettingsModal);
   $('settingsCancelBtn').addEventListener('click', closeSettings);
   $('settingsCloseBtn').addEventListener('click', closeSettings);
+  // 切换接口类型时联动默认地址/模型
+  $('setLlmProvider').addEventListener('change', (e) => {
+    const anthropic = e.target.value === 'anthropic';
+    const urlEl = $('setLlmBaseUrl'), modelEl = $('setLlmModel');
+    if (!urlEl.value.trim() || urlEl.value.indexOf('deepseek') >= 0 || urlEl.value.indexOf('anthropic') >= 0) {
+      urlEl.value = anthropic ? 'https://api.anthropic.com' : 'https://api.deepseek.com';
+    }
+    if (!modelEl.value.trim() || modelEl.value.indexOf('deepseek') >= 0 || modelEl.value.indexOf('claude') >= 0) {
+      modelEl.value = anthropic ? 'claude-sonnet-4-5' : 'deepseek-chat';
+    }
+  });
   $('settingsModal').addEventListener('click', (e) => {
     if (e.target === $('settingsModal')) closeSettings();
   });
