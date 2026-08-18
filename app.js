@@ -18,7 +18,10 @@ const state = {
   mergeFiles: [],
   mergeLayout: 1,
   mergeOrient: 'portrait',
-  mergeBorder: 'none'
+  mergeBorder: 'none',
+  bankRows: [],       // 银行流水（自动对账）
+  reconResult: null,  // 对账结果
+  currentReport: null // 当前报表（周报/月报）
 };
 
 const DEMO_DATA = [
@@ -97,9 +100,49 @@ function setupUpload(boxId, btnId, inputId, handler) {
     box.addEventListener(ev, (e) => { e.preventDefault(); box.classList.remove('dragover'); });
   });
   box.addEventListener('drop', (e) => {
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+    const files = Array.from(e.dataTransfer.files).filter(f =>
+      f.type === 'application/pdf' || /\.(pdf|ofd|jpg|jpeg|png|webp|bmp)$/i.test(f.name));
     if (files.length > 0) handler(files);
-    else showToast('请上传 PDF 格式文件', 'error');
+    else showToast('请上传 PDF / OFD / 图片格式文件', 'error');
+  });
+}
+
+/* ============ 图片发票（拍照录入） ============ */
+
+function isImageFile(file) {
+  return /\.(jpg|jpeg|png|webp|bmp)$/i.test(file.name) || /^image\//.test(file.type);
+}
+
+// 图片 → 压缩 → JPEG base64（供腾讯云 OCR，长边 2048，白底填充）
+function imageFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxSide = 2048;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if (Math.max(w, h) > maxSide) {
+          const r = maxSide / Math.max(w, h);
+          w = Math.round(w * r);
+          h = Math.round(h * r);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/jpeg', 0.9).split(',')[1]);
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片加载失败')); };
+    img.src = url;
   });
 }
 
@@ -484,8 +527,16 @@ async function renderPdfToImages(file, maxPages) {
   return images;
 }
 
-// 统一入口：PDF 走 pdf.js 文本提取，OFD 走 JSZip 解包提取
+// 统一入口：图片走压缩+OCR，OFD 走 JSZip 解包提取，PDF 走 pdf.js 文本提取
 async function extractInvoiceText(file) {
+  if (isImageFile(file)) {
+    if (!AI.isConfigured('ocr')) {
+      throw new Error('图片识别需要先在设置中开启并配置腾讯云 OCR');
+    }
+    const b64 = await imageFileToBase64(file);
+    const text = await AI.ocrText(b64);
+    return { text: text || '', numPages: 1 };
+  }
   const isOfd = /\.ofd$/i.test(file.name);
   if (isOfd) {
     return OFD.extractText(file);
@@ -729,6 +780,404 @@ function exportDedupExcel() {
   XLSX.utils.book_append_sheet(wb, ws, '查重结果');
   XLSX.writeFile(wb, '查重结果_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   showToast('已导出 Excel 文件', 'success');
+}
+
+/* ============ 自动对账（银行流水 ⇄ 台账） ============ */
+
+function handleBankFiles(files) {
+  const file = files[0];
+  if (!file) return;
+  showLoading('正在读取银行流水...');
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const sheetRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      const rows = Recon.parseBankRows(sheetRows);
+      if (!rows.length) {
+        hideLoading();
+        showToast('未能识别流水数据，请确认表头包含「交易日期/对方户名/收入/支出」等列', 'error');
+        return;
+      }
+      state.bankRows = rows;
+      state.reconResult = null;
+      hideLoading();
+      renderRecon();
+      showToast('已读取 ' + rows.length + ' 笔银行流水，点击「开始对账」', 'success');
+    } catch (err) {
+      hideLoading();
+      console.error(err);
+      showToast('读取流水失败: ' + err.message, 'error');
+    }
+  };
+  reader.onerror = () => { hideLoading(); showToast('读取文件失败', 'error'); };
+  reader.readAsArrayBuffer(file);
+}
+
+function startRecon() {
+  if (!state.bankRows.length) return;
+  showLoading('正在与台账自动匹配...');
+  setTimeout(() => {
+    const res = Recon.matchLedger(state.ledger, state.bankRows, {
+      isMyCompanyFn: (n) => isMyCompany(n)
+    });
+    state.reconResult = res;
+    hideLoading();
+    renderRecon();
+    showToast('对账完成：匹配 ' + res.stats.matched + ' / ' + res.stats.total + ' 笔',
+      res.stats.unmatched > 0 ? 'error' : 'success');
+  }, 30);
+}
+
+function renderRecon() {
+  const body = $('reconBody');
+  const rows = state.bankRows;
+  const res = state.reconResult;
+
+  if (!rows.length) {
+    body.innerHTML = '<tr class="empty-row"><td colspan="9">上传银行流水并点击「开始对账」</td></tr>';
+    $('reconMeta').textContent = '请先上传银行流水';
+    $('startReconBtn').disabled = true;
+    $('clearReconBtn').disabled = true;
+    $('exportReconBtn').disabled = true;
+    $('reconAiBtn').disabled = true;
+    $('reconStats').innerHTML = '';
+    $('reconAiResult').hidden = true;
+    return;
+  }
+
+  // 统计卡
+  let statsHtml = '<div class="stat-card"><span class="stat-label">流水笔数</span><span class="stat-value">' + rows.length + '</span></div>';
+  if (res) {
+    const s = res.stats;
+    statsHtml +=
+      '<div class="stat-card"><span class="stat-label">已匹配</span><span class="stat-value ok">' + s.matched + '</span></div>' +
+      '<div class="stat-card"><span class="stat-label">未匹配</span><span class="stat-value bad">' + s.unmatched + '</span></div>' +
+      '<div class="stat-card"><span class="stat-label">收款合计</span><span class="stat-value">' + formatAmount(s.inAmount.toFixed(2)) + '</span></div>' +
+      '<div class="stat-card"><span class="stat-label">付款合计</span><span class="stat-value">' + formatAmount(s.outAmount.toFixed(2)) + '</span></div>';
+  } else {
+    statsHtml += '<div class="stat-card stat-hint"><span class="stat-label">提示</span><span class="stat-value" style="font-size:13px">点击「开始对账」匹配台账</span></div>';
+  }
+  $('reconStats').innerHTML = statsHtml;
+
+  // 表格
+  let html = '';
+  rows.forEach((r, idx) => {
+    const done = res !== null && res.rows[idx];
+    const m = done ? res.rows[idx] : null;
+    const statusClass = m ? (m.status === 'matched' ? 'tag-success' : 'tag-danger') : 'tag-warning';
+    const statusText = m ? (m.status === 'matched' ? '已匹配' : '未匹配') : '待对账';
+    const reason = m ? (m.status === 'matched' ? (m.warning || '') : (m.reason || '')) : '';
+    const warnClass = m && m.status === 'matched' && m.warning ? ' cell-warn' : '';
+    html += '<tr class="' + (m && m.status === 'unmatched' ? 'duplicate' : '') + '">' +
+      '<td>' + esc(r.date) + '</td>' +
+      '<td class="cell-ellipsis" title="' + esc(r.counterparty) + '">' + esc(r.counterparty || '-') + '</td>' +
+      '<td class="center">' + (r.direction === 'in' ? '收款' : '付款') + '</td>' +
+      '<td class="num">' + formatAmount(r.amount.toFixed(2)) + '</td>' +
+      '<td class="center"><span class="tag ' + statusClass + '">' + statusText + '</span></td>' +
+      '<td class="mono">' + esc(m ? (m.invoiceNumber || '') : '-') + '</td>' +
+      '<td class="cell-ellipsis" title="' + esc(m ? (m.invoiceParty || '') : '') + '">' + esc(m ? (m.invoiceParty || '-') : '-') + '</td>' +
+      '<td>' + esc(m ? (m.invoiceDate || '-') : '-') + '</td>' +
+      '<td class="' + warnClass + '">' + esc(reason || '-') + '</td>' +
+      '</tr>';
+  });
+  body.innerHTML = html;
+
+  const meta = res
+    ? '共 ' + rows.length + ' 笔，匹配 ' + res.stats.matched + ' 笔，未匹配 ' + res.stats.unmatched + ' 笔'
+    : '共 ' + rows.length + ' 笔，待对账';
+  $('reconMeta').textContent = meta;
+  $('reconMeta').className = 'result-meta' + (res && res.stats.unmatched > 0 ? ' warn' : '');
+  $('startReconBtn').disabled = false;
+  $('clearReconBtn').disabled = false;
+  $('exportReconBtn').disabled = !(res && res.rows.length > 0);
+  $('reconAiBtn').disabled = !(res && res.rows.some(r => r.status === 'unmatched'));
+}
+
+function clearRecon() {
+  state.bankRows = [];
+  state.reconResult = null;
+  $('reconAiResult').hidden = true;
+  renderRecon();
+  showToast('已清空对账数据', 'success');
+}
+
+function exportReconExcel() {
+  if (!state.reconResult || !state.reconResult.rows.length) return;
+  try {
+    const wb = Recon.buildReconWorkbook(state.reconResult.rows);
+    XLSX.writeFile(wb, '对账结果_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+    showToast('已导出对账结果 Excel', 'success');
+  } catch (err) {
+    console.error(err);
+    showToast('导出失败: ' + err.message, 'error');
+  }
+}
+
+// AI 分析未匹配流水原因
+async function aiAnalyzeRecon() {
+  if (!state.reconResult) return;
+  const unmatched = state.reconResult.rows.filter(r => r.status === 'unmatched');
+  if (!unmatched.length) { showToast('没有未匹配项需要分析', 'success'); return; }
+  if (!AI.isConfigured('llm')) {
+    showToast('请先在「设置」中开启并配置大模型（DeepSeek/混元等）', 'error');
+    return;
+  }
+  showLoading('AI 正在分析 ' + unmatched.length + ' 笔未匹配流水...');
+  try {
+    const p = Recon.analyzeUnmatchedPrompt(unmatched, state.bankRows);
+    const content = await AI.llmChat([
+      { role: 'system', content: p.system },
+      { role: 'user', content: p.user }
+    ], { temperature: 0.3, maxTokens: 1200 });
+    renderMarkdownToHtml($('reconAiResult'), content);
+    $('reconAiResult').hidden = false;
+    hideLoading();
+    showToast('AI 分析完成', 'success');
+  } catch (err) {
+    hideLoading();
+    console.error(err);
+    showToast('AI 分析失败: ' + err.message, 'error');
+  }
+}
+
+/* ============ 报表中心（周报 / 月报 / AI 分析） ============ */
+
+// 极简 Markdown 渲染（标题/列表/加粗/行内代码）
+function inlineMd(s) {
+  return esc(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function renderMarkdownToHtml(el, md) {
+  const lines = String(md || '').split('\n');
+  let html = '', listTag = '';
+  lines.forEach(l => {
+    if (/^#{1,4}\s/.test(l)) {
+      if (listTag) { html += '</' + listTag + '>'; listTag = ''; }
+      const level = l.match(/^#+/)[0].length;
+      html += '<div class="md-h' + level + '">' + inlineMd(l.replace(/^#+\s*/, '')) + '</div>';
+    } else if (/^\s*[-*]\s/.test(l)) {
+      if (listTag !== 'ul') {
+        if (listTag) html += '</' + listTag + '>';
+        html += '<ul class="md-list">';
+        listTag = 'ul';
+      }
+      html += '<li>' + inlineMd(l.replace(/^\s*[-*]\s*/, '')) + '</li>';
+    } else if (/^\s*\d+[.、]\s/.test(l)) {
+      if (listTag !== 'ol') {
+        if (listTag) html += '</' + listTag + '>';
+        html += '<ol class="md-list">';
+        listTag = 'ol';
+      }
+      html += '<li>' + inlineMd(l.replace(/^\s*\d+[.、]\s*/, '')) + '</li>';
+    } else {
+      if (listTag) { html += '</' + listTag + '>'; listTag = ''; }
+      if (l.trim()) html += '<div class="md-p">' + inlineMd(l) + '</div>';
+    }
+  });
+  if (listTag) html += '</' + listTag + '>';
+  el.innerHTML = html;
+}
+
+function fmtDateObj(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function buildWeekly() {
+  if (!state.ledger.length) { showToast('台账为空，请先上传发票', 'error'); return; }
+  const rep = Report.buildWeeklyReport(state.ledger, { isMyCompanyFn: isMyCompany });
+  state.currentReport = rep;
+  renderReportView(rep);
+}
+
+function buildMonthly() {
+  if (!state.ledger.length) { showToast('台账为空，请先上传发票', 'error'); return; }
+  const rep = Report.buildMonthlyReport(state.ledger, { isMyCompanyFn: isMyCompany });
+  state.currentReport = rep;
+  renderReportView(rep);
+}
+
+function renderReportView(rep) {
+  const s = rep.snapshot;
+  const fmt = (n) => '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const rangeText = fmtDateObj(rep.range.start) + ' ~ ' + fmtDateObj(rep.range.end);
+
+  let html = '';
+  // 头部
+  html += '<div class="report-card report-head">' +
+    '<div class="report-title">' + esc(rep.title) + '</div>' +
+    '<div class="report-sub">数据范围：' + rangeText + ' · 共 ' + s.count + ' 张发票</div>' +
+    '</div>';
+  // 收支汇总
+  html += '<div class="report-grid">' +
+    '<div class="report-metric"><span class="rm-label">收入</span><span class="rm-value in">' + fmt(s.inAmount) + '</span><span class="rm-sub">' + s.inCount + ' 张</span></div>' +
+    '<div class="report-metric"><span class="rm-label">支出</span><span class="rm-value out">' + fmt(s.outAmount) + '</span><span class="rm-sub">' + s.outCount + ' 张</span></div>' +
+    '<div class="report-metric"><span class="rm-label">净额</span><span class="rm-value">' + fmt(s.netAmount) + '</span><span class="rm-sub">收入 - 支出</span></div>' +
+    '</div>';
+  // Top5 供应商
+  html += '<div class="report-card"><div class="report-card-title">Top5 供应商（支出）</div>';
+  if (s.topSuppliers.length) {
+    const max = s.topSuppliers[0].amount || 1;
+    html += s.topSuppliers.map((x, i) =>
+      '<div class="report-bar-row"><span class="rb-rank">' + (i + 1) + '</span>' +
+      '<span class="rb-name" title="' + esc(x.name) + '">' + esc(x.name) + '</span>' +
+      '<span class="rb-track"><span class="rb-fill" style="width:' + Math.max(4, Math.round(x.amount / max * 100)) + '%"></span></span>' +
+      '<span class="rb-val">' + fmt(x.amount) + ' <em>' + x.count + ' 笔</em></span></div>').join('');
+  } else {
+    html += '<div class="report-none">本期无支出数据</div>';
+  }
+  html += '</div>';
+  // Top5 客户
+  if (s.topBuyers.length) {
+    html += '<div class="report-card"><div class="report-card-title">Top5 客户（收入）</div>';
+    const max = s.topBuyers[0].amount || 1;
+    html += s.topBuyers.map((x, i) =>
+      '<div class="report-bar-row"><span class="rb-rank">' + (i + 1) + '</span>' +
+      '<span class="rb-name" title="' + esc(x.name) + '">' + esc(x.name) + '</span>' +
+      '<span class="rb-track"><span class="rb-fill in" style="width:' + Math.max(4, Math.round(x.amount / max * 100)) + '%"></span></span>' +
+      '<span class="rb-val">' + fmt(x.amount) + ' <em>' + x.count + ' 笔</em></span></div>').join('');
+    html += '</div>';
+  }
+  // 支出分类占比
+  html += '<div class="report-card"><div class="report-card-title">支出分类占比</div>';
+  if (s.outCategory.length) {
+    const max = s.outCategory[0].amount || 1;
+    html += s.outCategory.map((x, i) =>
+      '<div class="report-bar-row"><span class="rb-rank">' + (i + 1) + '</span>' +
+      '<span class="rb-name" title="' + esc(x.name) + '">' + esc(x.name) + '</span>' +
+      '<span class="rb-track"><span class="rb-fill cat" style="width:' + Math.max(4, Math.round(x.amount / max * 100)) + '%"></span></span>' +
+      '<span class="rb-val">' + fmt(x.amount) + ' <em>' + x.count + ' 笔</em></span></div>').join('');
+  } else {
+    html += '<div class="report-none">本期无支出数据</div>';
+  }
+  html += '</div>';
+  // 异常提醒
+  if (rep.alerts.length) {
+    html += '<div class="report-card"><div class="report-card-title">异常波动提醒（环比）</div>' +
+      rep.alerts.map(a => '<div class="alert-item ' + a.level + '">' + esc(a.text) + '</div>').join('') +
+      '</div>';
+  }
+  // 分析
+  if (rep.analysis) {
+    html += '<div class="report-card"><div class="report-card-title">AI 财务分析</div><div class="md-body">' +
+      renderMarkdownText(rep.analysis) + '</div></div>';
+  }
+  $('reportView').innerHTML = html;
+  $('reportHint').textContent = '已生成：' + esc(rep.title) + '。可「复制简报」或「导出 Excel」';
+}
+
+// 分析报告 Markdown → HTML（纯文本返回）
+function renderMarkdownText(md) {
+  const tmp = document.createElement('div');
+  renderMarkdownToHtml(tmp, md);
+  return tmp.innerHTML;
+}
+
+// 用大模型生成文字版财务分析（未配置时模板降级）
+async function aiAnalyzeReport() {
+  if (!state.currentReport) { showToast('请先生成周报或月报，再生成 AI 分析', 'error'); return; }
+  if (!AI.isConfigured('llm')) {
+    state.currentReport.analysis = Report.templateAnalysis(state.currentReport.snapshot);
+    renderReportView(state.currentReport);
+    showToast('未配置大模型，已用内置模板生成基础分析（配置后效果更佳）', 'error');
+    return;
+  }
+  showLoading('AI 正在生成财务分析报告...');
+  try {
+    const p = Report.buildAnalysisPrompt(state.currentReport.snapshot);
+    const content = await AI.llmChat([
+      { role: 'system', content: p.system },
+      { role: 'user', content: p.user }
+    ], { temperature: 0.4, maxTokens: 1500 });
+    state.currentReport.analysis = content;
+    renderReportView(state.currentReport);
+    hideLoading();
+    showToast('AI 分析报告已生成', 'success');
+  } catch (err) {
+    hideLoading();
+    console.error(err);
+    showToast('AI 分析失败: ' + err.message, 'error');
+  }
+}
+
+function copyBrief() {
+  if (!state.currentReport) { showToast('请先生成周报或月报', 'error'); return; }
+  const text = Report.buildBriefText(state.currentReport);
+  const done = () => showToast('简报已复制，可粘贴到微信 / 钉钉 / 文档分享', 'success');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      fallbackCopy(text); done();
+    });
+  } else {
+    fallbackCopy(text); done();
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+  document.body.removeChild(ta);
+}
+
+function exportReportExcel() {
+  if (!state.currentReport) { showToast('请先生成周报或月报', 'error'); return; }
+  const s = state.currentReport.snapshot;
+  const rows = [
+    ['票小帮 · 业务报表'],
+    ['报表', state.currentReport.title],
+    ['数据范围', fmtDateObj(state.currentReport.range.start) + ' ~ ' + fmtDateObj(state.currentReport.range.end)],
+    [],
+    ['指标', '数值'],
+    ['收入(元)', s.inAmount],
+    ['支出(元)', s.outAmount],
+    ['净额(元)', s.netAmount],
+    ['发票张数', s.count],
+    ['收入张数', s.inCount],
+    ['支出张数', s.outCount],
+    [],
+    ['Top5 供应商', '金额(元)', '笔数'],
+  ];
+  s.topSuppliers.forEach(x => rows.push([x.name, x.amount, x.count]));
+  rows.push([], ['支出分类', '金额(元)', '笔数']);
+  s.outCategory.forEach(x => rows.push([x.name, x.amount, x.count]));
+  if (state.currentReport.analysis) {
+    rows.push([], ['AI 分析']);
+    String(state.currentReport.analysis).split('\n').forEach(l => rows.push([l]));
+  }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{ wch: 24 }, { wch: 16 }, { wch: 10 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '业务报表');
+  XLSX.writeFile(wb, '业务报表_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+  showToast('已导出业务报表 Excel', 'success');
+}
+
+// 周一打开页面自动生成上周周报（仅本地统计，不发送邮件）
+function checkMondayReport() {
+  try {
+    const d = new Date();
+    if (d.getDay() !== 1) return;
+    if (!state.ledger.length) return;
+    const rep = Report.buildWeeklyReport(state.ledger, { isMyCompanyFn: isMyCompany });
+    if (rep.snapshot.count === 0) return;
+    state.currentReport = rep;
+    renderReportView(rep);
+    setTimeout(() => {
+      showToast('今天是周一，已自动生成上周周报：收入 ¥' + rep.snapshot.inAmount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) +
+        '，支出 ¥' + rep.snapshot.outAmount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) + '，见「报表中心」', 'success');
+    }, 1200);
+  } catch (err) {
+    console.error('周一自动生成周报失败:', err);
+  }
 }
 
 /* ============ 手动编辑修正（台账模式：14 字段全可编辑） ============ */
@@ -1118,6 +1567,20 @@ function init() {
   });
   $('dedupFromLedgerBtn').addEventListener('click', dedupFromLedger);
 
+  // 自动对账
+  setupUpload('bankUploadBox', 'bankSelectBtn', 'bankFileInput', handleBankFiles);
+  $('startReconBtn').addEventListener('click', startRecon);
+  $('clearReconBtn').addEventListener('click', clearRecon);
+  $('exportReconBtn').addEventListener('click', exportReconExcel);
+  $('reconAiBtn').addEventListener('click', aiAnalyzeRecon);
+
+  // 报表中心
+  $('weekReportBtn').addEventListener('click', buildWeekly);
+  $('monthReportBtn').addEventListener('click', buildMonthly);
+  $('aiReportBtn').addEventListener('click', aiAnalyzeReport);
+  $('copyBriefBtn').addEventListener('click', copyBrief);
+  $('exportReportBtn').addEventListener('click', exportReportExcel);
+
   $('doMergeBtn').addEventListener('click', doMerge);
   setupLayoutButtons();
 
@@ -1171,7 +1634,10 @@ function init() {
   });
 
   // 启动恢复本地台账
-  initFromStore();
+  initFromStore().then(() => {
+    // 周一自动提醒（需先恢复台账）
+    checkMondayReport();
+  });
 
   console.log('%c票小帮已启动（台账模式）', 'color:#185fa5;font-size:14px;font-weight:bold');
   console.log('所有文件均在浏览器本地处理，不会上传到服务器');

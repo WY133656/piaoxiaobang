@@ -145,18 +145,20 @@
       });
   }
 
-  /* ---------- 大模型字段纠错（OpenAI 兼容接口） ---------- */
+  /* ---------- 大模型通用对话（OpenAI 兼容接口） ---------- */
 
-  function llmCorrect(invoice, rawText) {
-    if (!isConfigured('llm')) return Promise.resolve(invoice);
+  // 从模型返回内容中提取 JSON（兼容 ```json 代码块 / 纯 JSON / 夹杂文字）
+  function extractJson(content) {
+    var m = content.match(/```(?:json)?\s*([\s\S]*?)```/) || content.match(/\{[\s\S]*\}/);
+    var jsonStr = m ? (m[1] || m[0]) : content;
+    return JSON.parse(jsonStr.trim());
+  }
+
+  // 通用 chat 方法：messages = [{role, content}]，返回 content 字符串
+  function llmChat(messages, opts) {
+    if (!isConfigured('llm')) return Promise.reject(new Error('大模型未配置'));
     var cfg = getAIConfig();
-    var sysPrompt = '你是发票信息解析助手。根据用户提供的发票文本，提取字段并以JSON返回，只输出JSON对象，不要任何解释和Markdown。' +
-      '字段: number(发票号码/数电票号码), code(发票代码,无则空), date(开票日期,格式YYYY年MM月DD日), seller(销售方名称), buyer(购买方名称), ' +
-      'amount(金额即不含税金额), tax(税额), invoiceType(电子专票|电子普票|纸质专票|纸质普票), summary(商品/项目摘要,尽量简洁)。';
-    var userPrompt = '发票文本：\n' + String(rawText || '').slice(0, 4000) +
-      '\n\n当前已解析结果(可能不准确)：\n' + JSON.stringify(invoice) +
-      '\n\n请输出修正后的JSON字段，只包含能从文本确认的字段。';
-
+    var o = opts || {};
     return fetch(cfg.llmBaseUrl + '/chat/completions', {
       method: 'POST',
       headers: {
@@ -165,12 +167,9 @@
       },
       body: JSON.stringify({
         model: cfg.llmModel,
-        messages: [
-          { role: 'system', content: sysPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1,
-        max_tokens: 800
+        messages: messages,
+        temperature: o.temperature !== undefined ? o.temperature : 0.2,
+        max_tokens: o.maxTokens || 1200
       })
     }).then(function (res) {
       if (!res.ok) throw new Error('大模型请求失败: HTTP ' + res.status);
@@ -178,17 +177,35 @@
     }).then(function (data) {
       var content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
       if (!content) throw new Error('大模型返回为空');
-      var m = content.match(/```(?:json)?\s*([\s\S]*?)```/) || content.match(/\{[\s\S]*\}/);
-      var jsonStr = m ? (m[1] || m[0]) : content;
-      var parsed = JSON.parse(jsonStr.trim());
-      var out = Object.assign({}, invoice);
-      ['number', 'code', 'date', 'seller', 'buyer', 'amount', 'tax', 'invoiceType', 'summary'].forEach(function (k) {
-        if (parsed[k] !== undefined && parsed[k] !== null && String(parsed[k]).trim() !== '') {
-          out[k] = String(parsed[k]).trim();
-        }
-      });
-      return out;
+      return content;
     });
+  }
+
+  /* ---------- 大模型字段纠错（复用 llmChat） ---------- */
+
+  function llmCorrect(invoice, rawText) {
+    if (!isConfigured('llm')) return Promise.resolve(invoice);
+    var sysPrompt = '你是发票信息解析助手。根据用户提供的发票文本，提取字段并以JSON返回，只输出JSON对象，不要任何解释和Markdown。' +
+      '字段: number(发票号码/数电票号码), code(发票代码,无则空), date(开票日期,格式YYYY年MM月DD日), seller(销售方名称), buyer(购买方名称), ' +
+      'amount(金额即不含税金额), tax(税额), invoiceType(电子专票|电子普票|纸质专票|纸质普票), summary(商品/项目摘要,尽量简洁)。';
+    var userPrompt = '发票文本：\n' + String(rawText || '').slice(0, 4000) +
+      '\n\n当前已解析结果(可能不准确)：\n' + JSON.stringify(invoice) +
+      '\n\n请输出修正后的JSON字段，只包含能从文本确认的字段。';
+
+    return llmChat([
+      { role: 'system', content: sysPrompt },
+      { role: 'user', content: userPrompt }
+    ], { temperature: 0.1, maxTokens: 800 })
+      .then(function (content) {
+        var parsed = extractJson(content);
+        var out = Object.assign({}, invoice);
+        ['number', 'code', 'date', 'seller', 'buyer', 'amount', 'tax', 'invoiceType', 'summary'].forEach(function (k) {
+          if (parsed[k] !== undefined && parsed[k] !== null && String(parsed[k]).trim() !== '') {
+            out[k] = String(parsed[k]).trim();
+          }
+        });
+        return out;
+      });
   }
 
   var AI = {
@@ -198,6 +215,7 @@
     getAIConfig: getAIConfig,
     isConfigured: isConfigured,
     ocrText: ocrText,
+    llmChat: llmChat,
     llmCorrect: llmCorrect
   };
 

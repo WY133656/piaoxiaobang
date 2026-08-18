@@ -15,6 +15,8 @@
   <script src="store.js"></script>
   <script src="ofd.js"></script>
   <script src="ai.js"></script>
+  <script src="recon.js"></script>
+  <script src="report.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -24,6 +26,8 @@
         <button class="tab active" data-page="ledger">台账管理</button>
         <button class="tab" data-page="dedup">发票查重</button>
         <button class="tab" data-page="merge">合并打印</button>
+        <button class="tab" data-page="recon">自动对账</button>
+        <button class="tab" data-page="report">报表中心</button>
       </nav>
     </div>
     <div class="topbar-right">
@@ -47,14 +51,14 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </div>
-            <div class="upload-title">拖拽上传 PDF / OFD 发票</div>
-            <div class="upload-hint">或点击选择文件（可多选）</div>
+            <div class="upload-title">拖拽上传 PDF / OFD / 图片发票</div>
+            <div class="upload-hint">手机拍照直接上传，AI 自动识别</div>
             <button class="btn btn-primary" id="ledgerSelectBtn">选择文件</button>
-            <input type="file" id="ledgerFileInput" accept=".pdf,.ofd" multiple hidden>
+            <input type="file" id="ledgerFileInput" accept=".pdf,.ofd,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden>
           </div>
           <div class="upload-tips">
-            <p>支持批量上传 PDF、OFD 格式发票（含数电票）</p>
-            <p>文件仅在浏览器本地处理，不会上传服务器</p>
+            <p>支持 PDF、OFD 电子发票，以及手机拍照的 JPG/PNG 图片</p>
+            <p>图片识别需在设置中开启腾讯云 OCR；文件仅在浏览器本地处理</p>
           </div>
           <button class="btn btn-ghost btn-block" id="loadDemoBtn">加载演示数据</button>
         </aside>
@@ -122,10 +126,10 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </div>
-            <div class="upload-title">拖拽上传 PDF / OFD 发票</div>
+            <div class="upload-title">拖拽上传 PDF / OFD / 图片发票</div>
             <div class="upload-hint">系统将自动比对查重</div>
             <button class="btn btn-primary" id="dedupSelectBtn">选择文件</button>
-            <input type="file" id="dedupFileInput" accept=".pdf,.ofd" multiple hidden>
+            <input type="file" id="dedupFileInput" accept=".pdf,.ofd,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden>
           </div>
           <div class="upload-tips">
             <p>按发票号码自动比对，标注重复项</p>
@@ -231,6 +235,86 @@
             <div class="merge-preview-info" id="mergePreviewInfo">请先上传发票文件</div>
             <button class="btn btn-primary" id="doMergeBtn" disabled>合并并下载 PDF</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-recon" class="page">
+      <div class="page-grid">
+        <aside class="upload-panel">
+          <div class="upload-box" id="bankUploadBox">
+            <div class="upload-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <div class="upload-title">上传银行流水 Excel</div>
+            <div class="upload-hint">支持 .xlsx / .xls，自动识别列头</div>
+            <button class="btn btn-primary" id="bankSelectBtn">选择文件</button>
+            <input type="file" id="bankFileInput" accept=".xlsx,.xls" multiple hidden>
+          </div>
+          <div class="upload-tips">
+            <p>从网银导出的流水表（交易日期 / 对方户名 / 收入 / 支出 / 余额）</p>
+            <p>与发票台账自动匹配：金额 + 对方名称 + 方向 + 日期窗口</p>
+            <p>数据仅在浏览器本地处理，不会上传服务器</p>
+          </div>
+          <button class="btn btn-primary btn-block" id="startReconBtn" disabled>开始对账</button>
+        </aside>
+
+        <div class="result-panel">
+          <div class="result-header">
+            <div>
+              <span class="result-title">对账结果</span>
+              <span class="result-meta" id="reconMeta">请先上传银行流水</span>
+            </div>
+            <div class="result-actions">
+              <button class="btn btn-ghost" id="reconAiBtn" disabled title="大模型分析未匹配流水的原因">AI 分析未匹配</button>
+              <button class="btn btn-ghost" id="clearReconBtn" disabled>清空</button>
+              <button class="btn btn-primary" id="exportReconBtn" disabled>导出 Excel</button>
+            </div>
+          </div>
+          <div class="recon-stats" id="reconStats"></div>
+          <div class="table-wrap">
+            <table class="invoice-table" id="reconTable">
+              <thead>
+                <tr>
+                  <th style="width:10%">交易日期</th>
+                  <th style="width:22%">对方户名/摘要</th>
+                  <th style="width:8%" class="center">方向</th>
+                  <th style="width:10%" class="num">流水金额</th>
+                  <th style="width:8%" class="center">状态</th>
+                  <th style="width:14%">匹配发票号码</th>
+                  <th style="width:13%">匹配对方</th>
+                  <th style="width:10%">发票日期</th>
+                  <th style="width:18%">原因/提示</th>
+                </tr>
+              </thead>
+              <tbody id="reconBody">
+                <tr class="empty-row"><td colspan="9">上传银行流水并点击「开始对账」</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ai-report" id="reconAiResult" hidden></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-report" class="page">
+      <div class="report-layout">
+        <div class="report-toolbar">
+          <div class="report-actions">
+            <button class="btn" id="weekReportBtn">生成上周周报</button>
+            <button class="btn" id="monthReportBtn">生成上月月报</button>
+            <button class="btn btn-primary" id="aiReportBtn">AI 分析报告</button>
+            <button class="btn btn-ghost" id="copyBriefBtn">复制简报</button>
+            <button class="btn btn-ghost" id="exportReportBtn">导出 Excel</button>
+          </div>
+          <div class="report-hint" id="reportHint">数据来自本地发票台账；周一打开页面会自动生成上周周报（仅统计，不发邮件）。</div>
+        </div>
+        <div class="report-view" id="reportView">
+          <div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / AI 分析报告将显示在这里</div>
         </div>
       </div>
     </section>
