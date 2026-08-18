@@ -108,6 +108,133 @@ body {
   color: var(--color-info);
 }
 
+/* 顶栏设置按钮 */
+.settings-btn {
+  margin-left: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+/* ---------- 筛选栏 + 统计卡 ---------- */
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.filter-input {
+  flex: 1;
+  min-width: 180px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--color-info);
+  box-shadow: 0 0 0 2px var(--bg-info);
+}
+
+.filter-select {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.filter-select:focus {
+  outline: none;
+  border-color: var(--color-info);
+}
+
+.stat-cards {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.stat-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 14px;
+  text-align: center;
+  min-width: 92px;
+}
+
+.stat-card .stat-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.stat-card .stat-value {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-info);
+  font-family: "SF Mono", "Consolas", "Menlo", monospace;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* ---------- 设置弹窗 ---------- */
+
+.settings-section {
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.settings-section:last-of-type {
+  border-bottom: none;
+}
+
+.settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  padding-left: 10px;
+  border-left: 3px solid var(--color-info);
+}
+
+.settings-tip {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.7;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+@media (max-width: 860px) {
+  .stat-cards {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+  .stat-card {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 .container {
   flex: 1;
   max-width: 1200px;

@@ -10,7 +10,11 @@
   <script src="lib/pdf.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js&quot;><\/script>')"></script>
   <script src="lib/pdf-lib.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js&quot;><\/script>')"></script>
   <script src="lib/xlsx.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js&quot;><\/script>')"></script>
+  <script src="lib/jszip.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js&quot;><\/script>')"></script>
   <script src="ledger.js"></script>
+  <script src="store.js"></script>
+  <script src="ofd.js"></script>
+  <script src="ai.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -26,6 +30,7 @@
       <span class="stats-label">已处理</span>
       <span class="stats-count" id="totalCount">0</span>
       <span class="stats-label">张</span>
+      <button class="btn btn-ghost settings-btn" id="settingsBtn" title="系统设置">⚙ 设置</button>
     </div>
   </header>
 
@@ -42,13 +47,13 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </div>
-            <div class="upload-title">拖拽上传 PDF 发票</div>
+            <div class="upload-title">拖拽上传 PDF / OFD 发票</div>
             <div class="upload-hint">或点击选择文件（可多选）</div>
             <button class="btn btn-primary" id="ledgerSelectBtn">选择文件</button>
-            <input type="file" id="ledgerFileInput" accept=".pdf" multiple hidden>
+            <input type="file" id="ledgerFileInput" accept=".pdf,.ofd" multiple hidden>
           </div>
           <div class="upload-tips">
-            <p>支持批量上传 PDF 格式发票</p>
+            <p>支持批量上传 PDF、OFD 格式发票（含数电票）</p>
             <p>文件仅在浏览器本地处理，不会上传服务器</p>
           </div>
           <button class="btn btn-ghost btn-block" id="loadDemoBtn">加载演示数据</button>
@@ -61,8 +66,21 @@
               <span class="result-meta" id="ledgerMeta">暂无数据</span>
             </div>
             <div class="result-actions">
+              <button class="btn btn-ghost" id="downloadZipBtn" disabled title="按「重命名后文件名」打包下载">打包下载</button>
               <button class="btn btn-ghost" id="clearLedgerBtn" disabled>清空</button>
               <button class="btn btn-primary" id="exportExcelBtn" disabled>导出 Excel</button>
+            </div>
+          </div>
+          <div class="filter-bar">
+            <input type="text" id="ledgerSearch" class="filter-input" placeholder="搜索号码 / 销售方 / 摘要 / 日期...">
+            <select id="ledgerCategoryFilter" class="filter-select">
+              <option value="">全部分类</option>
+            </select>
+            <div class="stat-cards">
+              <div class="stat-card"><span class="stat-label">发票张数</span><span class="stat-value" id="statCount">0</span></div>
+              <div class="stat-card"><span class="stat-label">金额合计</span><span class="stat-value" id="statAmount">¥0.00</span></div>
+              <div class="stat-card"><span class="stat-label">税额合计</span><span class="stat-value" id="statTax">¥0.00</span></div>
+              <div class="stat-card"><span class="stat-label">价税合计</span><span class="stat-value" id="statTotal">¥0.00</span></div>
             </div>
           </div>
           <div class="table-wrap">
@@ -104,10 +122,10 @@
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </div>
-            <div class="upload-title">拖拽上传 PDF 发票</div>
+            <div class="upload-title">拖拽上传 PDF / OFD 发票</div>
             <div class="upload-hint">系统将自动比对查重</div>
             <button class="btn btn-primary" id="dedupSelectBtn">选择文件</button>
-            <input type="file" id="dedupFileInput" accept=".pdf" multiple hidden>
+            <input type="file" id="dedupFileInput" accept=".pdf,.ofd" multiple hidden>
           </div>
           <div class="upload-tips">
             <p>按发票号码自动比对，标注重复项</p>
@@ -290,6 +308,70 @@
       <div class="modal-footer">
         <button class="btn" id="editCancelBtn">取消</button>
         <button class="btn btn-primary" id="editSaveBtn">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="settingsModal" hidden>
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">系统设置</span>
+        <button class="modal-close" id="settingsCloseBtn">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-section">
+          <div class="settings-title">基本信息</div>
+          <label class="form-item form-full">自家公司名称（购买方）
+            <input type="text" id="setMyCompany" placeholder="如 浙江通途数科建设有限公司">
+          </label>
+          <p class="settings-tip">用于识别销售方/购买方归属，以及「购买方非本公司」特殊说明，自动保存到本机浏览器。</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">扫描件 OCR 识别（腾讯云，可选）</div>
+          <label class="form-item">启用 OCR
+            <select id="setOcrEnabled">
+              <option value="0">关闭</option>
+              <option value="1">开启</option>
+            </select>
+          </label>
+          <label class="form-item">地域（Region）
+            <input type="text" id="setOcrRegion" placeholder="ap-guangzhou">
+          </label>
+          <label class="form-item form-full">SecretId（访问密钥）
+            <input type="text" id="setOcrSecretId" placeholder="腾讯云 API 密钥 SecretId">
+          </label>
+          <label class="form-item form-full">SecretKey
+            <input type="password" id="setOcrSecretKey" placeholder="腾讯云 API 密钥 SecretKey">
+          </label>
+          <p class="settings-tip">开启后，PDF 文本提取为空（扫描件）时自动渲染页面并调用腾讯云 OCR 识别。通用印刷体识别约 ¥0.6/次，每月 1000 次免费额度。</p>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-title">大模型字段纠错（可选）</div>
+          <label class="form-item">启用大模型
+            <select id="setLlmEnabled">
+              <option value="0">关闭</option>
+              <option value="1">开启</option>
+            </select>
+          </label>
+          <label class="form-item">接口地址（Base URL）
+            <input type="text" id="setLlmBaseUrl" placeholder="https://api.deepseek.com">
+          </label>
+          <label class="form-item">模型名称
+            <input type="text" id="setLlmModel" placeholder="deepseek-chat">
+          </label>
+          <label class="form-item form-full">API Key
+            <input type="password" id="setLlmApiKey" placeholder="大模型服务商 API Key">
+          </label>
+          <p class="settings-tip">支持 OpenAI 兼容接口（DeepSeek / 腾讯混元 / 通义千问等）。开启后每次识别会用大模型校验号码、金额、日期等字段，提升准确率。</p>
+        </div>
+
+        <div class="modal-hint">密钥仅保存在本机浏览器 localStorage，不会上传到任何服务器。OCR/大模型调用产生的费用由对应服务商按量计费。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="settingsCancelBtn">取消</button>
+        <button class="btn btn-primary" id="settingsSaveBtn">保存设置</button>
       </div>
     </div>
   </div>

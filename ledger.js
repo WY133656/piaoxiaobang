@@ -194,9 +194,34 @@
 
   const CATEGORIES = ['管理费用-办公费', '管理费用-低值易耗品', '管理费用-福利费', '管理费用-业务招待费', '管理费用-广告宣传费', '管理费用-差旅费', '管理费用-通讯费', '管理费用-交通费', '销售费用-广告宣传费', '建设费用', '待确认'];
 
-  /* ---------- 特殊情况说明 ---------- */
+  /* ---------- 自家公司（购买方）配置 ----------
+   * 全称可在设置弹窗修改，持久化到 localStorage['piaoxiaobang_settings'].myCompany
+   */
 
-  const MY_COMPANY = '浙江通途数科建设有限公司'; // TODO: 改成你公司全称（可在编辑弹窗修改备注后自动记忆）
+  const SETTINGS_KEY = 'piaoxiaobang_settings';
+  const DEFAULT_COMPANY = '浙江通途数科建设有限公司';
+
+  function getMyCompany() {
+    try {
+      const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(SETTINGS_KEY) : null;
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s.myCompany && String(s.myCompany).trim()) return String(s.myCompany).trim();
+      }
+    } catch (e) { /* ignore */ }
+    return DEFAULT_COMPANY;
+  }
+
+  function setMyCompany(name) {
+    if (!name || !String(name).trim()) return;
+    try {
+      const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+      s.myCompany = String(name).trim();
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch (e) { /* ignore */ }
+  }
+
+  /* ---------- 特殊情况说明 ---------- */
 
   function buildRemark(inv) {
     const out = [];
@@ -257,6 +282,7 @@
       out.push('小额采购(¥' + yuan(total) + ')，保留发票及付款凭证备查');
     }
     // 5) 购买方非本公司提示
+    const MY_COMPANY = getMyCompany();
     if (MY_COMPANY && inv.buyer && inv.buyer !== MY_COMPANY) {
       out.push('购买方为' + inv.buyer + '，非本公司，需说明费用归属关系或提供代付说明');
     }
@@ -396,7 +422,9 @@
     enrichInvoice: enrichInvoice,
     buildLedgerWorkbook: buildLedgerWorkbook,
     CATEGORIES: CATEGORIES,
-    MY_COMPANY: MY_COMPANY
+    getMyCompany: getMyCompany,
+    setMyCompany: setMyCompany,
+    get MY_COMPANY() { return getMyCompany(); }
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = LedgerCore;

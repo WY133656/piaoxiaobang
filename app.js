@@ -227,11 +227,14 @@ function looksLikeCompany(n) {
   return /(有限|公司|集团|厂|店|餐馆|饭店|商行|经营部|事务所|工作室|部|所|行|院|中心)$/.test(n);
 }
 
-// 是否自家公司（通途数科）——购买方通常是本公司，用它来区分销售方/购买方
+// 是否自家公司（购买方通常是本公司，用它来区分销售方/购买方）
+// 公司名可在设置弹窗修改（localStorage 持久化），支持全称/核心词匹配
 function isMyCompany(n) {
-  const MY = (LC && LC.MY_COMPANY) || '';
+  const MY = (LC && LC.getMyCompany()) || '';
   if (!MY || !n) return false;
-  return n.indexOf('通途') >= 0 || n === MY || n.indexOf(MY) >= 0;
+  // 核心词：去掉后缀（如"浙江通途数科建设有限公司" → "通途数科"）
+  const core = MY.replace(/(股份有限公司|有限责任公司|有限公司|集团有限公司)/g, '').slice(0, 4);
+  return n === MY || n.indexOf(MY) >= 0 || MY.indexOf(n) >= 0 || (core.length >= 2 && n.indexOf(core) >= 0);
 }
 
 function parseInvoiceText(rawText, fileName) {
@@ -346,21 +349,58 @@ function esc(s) {
 
 const LEDGER_COLS = 13;
 
+// 筛选状态（搜索关键词 / 费用分类）
+const filterState = { keyword: '', category: '' };
+
+function getFilteredLedger() {
+  const k = filterState.keyword;
+  const c = filterState.category;
+  return state.ledger.filter(inv => {
+    if (c && inv.category !== c) return false;
+    if (k) {
+      const hay = [inv.number, inv.code, inv.date, inv.seller, inv.sellerShort, inv.summary, inv.buyer, inv.remark]
+        .join(' ').toLowerCase();
+      if (hay.indexOf(k) < 0) return false;
+    }
+    return true;
+  });
+}
+
+function updateStats() {
+  const filtered = getFilteredLedger();
+  let amt = 0, tax = 0, all = 0;
+  filtered.forEach(inv => {
+    amt += LC.round2(inv.amount);
+    tax += LC.round2(inv.tax);
+    all += LC.round2(LC.totalOf(inv));
+  });
+  const fmt = (n) => '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $('statCount').textContent = filtered.length;
+  $('statAmount').textContent = fmt(amt);
+  $('statTax').textContent = fmt(tax);
+  $('statTotal').textContent = fmt(all);
+}
+
 function renderLedger() {
   const body = $('ledgerBody');
   const list = state.ledger;
+  const filtered = getFilteredLedger();
 
   if (list.length === 0) {
     body.innerHTML = '<tr class="empty-row"><td colspan="' + LEDGER_COLS + '">上传 PDF 发票后，识别结果将显示在这里</td></tr>';
     $('ledgerMeta').textContent = '暂无数据';
     $('exportExcelBtn').disabled = true;
     $('clearLedgerBtn').disabled = true;
+    $('downloadZipBtn').disabled = true;
+    updateStats();
     return;
   }
 
   const dupNumbers = findDuplicates(list);
   let html = '';
-  list.forEach((inv, idx) => {
+  filtered.forEach(inv => {
+    // 编辑按钮需定位 state.ledger 中的真实下标
+    const idx = state.ledger.indexOf(inv);
     const isDup = dupNumbers.has(dedupKey(inv));
     const complete = invoiceIsComplete(inv);
     const rowClass = (isDup ? 'duplicate ' : '') + (!complete ? 'incomplete' : '');
@@ -382,12 +422,16 @@ function renderLedger() {
       '<td class="center"><button class="edit-btn" data-list="ledger" data-idx="' + idx + '">编辑</button></td>' +
       '</tr>';
   });
+  if (filtered.length === 0) {
+    html = '<tr class="empty-row"><td colspan="' + LEDGER_COLS + '">没有符合筛选条件的发票</td></tr>';
+  }
   body.innerHTML = html;
 
   const dupCount = list.filter(inv => dupNumbers.has(dedupKey(inv))).length;
   const incompleteCount = list.filter(inv => !invoiceIsComplete(inv)).length;
   const confirmCount = list.filter(inv => !inv.category || inv.category === '待确认').length;
   let meta = '共 ' + list.length + ' 张';
+  if (filtered.length !== list.length) meta += '，当前显示 ' + filtered.length + ' 张';
   if (dupCount > 0) meta += '，发现 ' + dupCount + ' 张重复';
   if (incompleteCount > 0) meta += '，' + incompleteCount + ' 张待补全';
   if (confirmCount > 0) meta += '，' + confirmCount + ' 张待确认分类';
@@ -395,6 +439,8 @@ function renderLedger() {
   $('ledgerMeta').className = 'result-meta' + (dupCount > 0 || incompleteCount > 0 || confirmCount > 0 ? ' warn' : '');
   $('exportExcelBtn').disabled = false;
   $('clearLedgerBtn').disabled = false;
+  $('downloadZipBtn').disabled = !filtered.some(inv => !!inv.file);
+  updateStats();
 
   bindEditButtons();
 }
@@ -412,47 +458,164 @@ function findDuplicates(list) {
   return dups;
 }
 
+// 台账数据持久化到 IndexedDB（file 字段不入库）
+function saveLedgerNow() {
+  return Store.saveLedger(state.ledger).catch(err => {
+    console.error('保存本地台账失败:', err);
+  });
+}
+
+// PDF 页面渲染为 JPEG base64（供 OCR 使用，最多前 N 页）
+async function renderPdfToImages(file, maxPages) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await PDFJS.getDocument({ data: arrayBuffer }).promise;
+  const pages = Math.min(pdf.numPages, maxPages || 3);
+  const images = [];
+  for (let i = 1; i <= pages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    images.push(canvas.toDataURL('image/jpeg', 0.92).split(',')[1]);
+  }
+  return images;
+}
+
+// 统一入口：PDF 走 pdf.js 文本提取，OFD 走 JSZip 解包提取
+async function extractInvoiceText(file) {
+  const isOfd = /\.ofd$/i.test(file.name);
+  if (isOfd) {
+    return OFD.extractText(file);
+  }
+  return extractPdfText(file);
+}
+
 async function handleLedgerFiles(files) {
   showLoading('正在识别发票 (' + files.length + ' 个文件)...');
-  let success = 0, fail = 0;
+  let success = 0, fail = 0, ocrCount = 0, llmCount = 0;
   for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     try {
-      $('loadingText').textContent = '正在识别 ' + (i + 1) + '/' + files.length + ': ' + files[i].name;
-      const { text } = await extractPdfText(files[i]);
-      const invoice = parseInvoiceText(text, files[i].name);
-      // 用台账规则引擎补齐：发票类型/摘要/简称/费用分类/特殊情况说明/重命名文件名
+      $('loadingText').textContent = '正在识别 ' + (i + 1) + '/' + files.length + ': ' + file.name;
+      const extracted = await extractInvoiceText(file);
+      let text = extracted.text || '';
+      let invoice = parseInvoiceText(text, file.name);
+
+      // 扫描件兜底：关键字段缺失且已配置腾讯云 OCR → 渲染页面转图片识别
+      if (!invoice.number && !/\.ofd$/i.test(file.name) && AI.isConfigured('ocr')) {
+        try {
+          $('loadingText').textContent = '文本为空，调用 OCR (' + (i + 1) + '/' + files.length + ')';
+          const images = await renderPdfToImages(file, 3);
+          const parts = [];
+          for (let j = 0; j < images.length; j++) {
+            const t = await AI.ocrText(images[j]);
+            if (t) parts.push(t);
+          }
+          if (parts.length > 0) {
+            text = parts.join('\n');
+            invoice = parseInvoiceText(text, file.name);
+            ocrCount++;
+          }
+        } catch (err) {
+          console.error('OCR 识别失败:', file.name, err);
+        }
+      }
+
+      // 大模型字段纠错（提升号码/金额/日期准确率）
+      if (AI.isConfigured('llm') && text) {
+        try {
+          $('loadingText').textContent = '大模型校验字段 (' + (i + 1) + '/' + files.length + ')';
+          const fixed = await AI.llmCorrect(invoice, text);
+          if (fixed) { invoice = fixed; llmCount++; }
+        } catch (err) {
+          console.error('大模型纠错失败:', file.name, err);
+        }
+      }
+
+      // 台账规则引擎补齐：发票类型/摘要/简称/费用分类/特殊情况说明/重命名文件名
       LC.enrichInvoice(invoice, text);
+      invoice.file = file; // 原始文件引用（仅内存，供打包下载）
       if (invoice.number || invoice.amount) {
         state.ledger.push(invoice);
         success++;
       } else {
-        const fallback = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: files[i].name };
+        const fallback = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: file.name };
         LC.enrichInvoice(fallback, text);
         state.ledger.push(fallback);
         fail++;
       }
     } catch (err) {
-      console.error('解析失败:', files[i].name, err);
-      const fb = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: files[i].name };
+      console.error('解析失败:', file.name, err);
+      const fb = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: file.name };
       LC.enrichInvoice(fb, '');
       state.ledger.push(fb);
       fail++;
     }
   }
   hideLoading();
+  await saveLedgerNow();
   updateTotalCount();
   renderLedger();
+  const extras = [];
+  if (ocrCount > 0) extras.push(ocrCount + ' 张走 OCR');
+  if (llmCount > 0) extras.push(llmCount + ' 张大模型校验');
+  const suffix = extras.length ? '（' + extras.join('，') + '）' : '';
   if (success > 0 && fail === 0) {
-    showToast('成功识别 ' + success + ' 张发票', 'success');
+    showToast('成功识别 ' + success + ' 张发票' + suffix, 'success');
   } else if (success > 0 && fail > 0) {
-    showToast('识别完成: ' + success + ' 张成功, ' + fail + ' 张待补全', 'error');
+    showToast('识别完成: ' + success + ' 张成功, ' + fail + ' 张待补全' + suffix, 'error');
   } else {
-    showToast('未能从 PDF 中提取发票信息（可能是扫描件）', 'error');
+    showToast('未能从文件中提取发票信息（可尝试在设置中开启 OCR）', 'error');
+  }
+}
+
+// 按「重命名后文件名」批量打包下载（仅含内存中有原始文件的发票）
+async function downloadLedgerZip() {
+  const list = getFilteredLedger().filter(inv => !!inv.file);
+  if (list.length === 0) {
+    showToast('当前列表没有可下载的原始文件，请重新上传发票', 'error');
+    return;
+  }
+  showLoading('正在打包 ' + list.length + ' 个文件...');
+  try {
+    const zip = new JSZip();
+    const used = {};
+    for (let i = 0; i < list.length; i++) {
+      const inv = list[i];
+      $('loadingText').textContent = '打包 ' + (i + 1) + '/' + list.length + ': ' + (inv.newName || inv.file.name);
+      const buf = await inv.file.arrayBuffer();
+      let name = inv.newName || inv.fileName || inv.file.name;
+      // OFD 文件保持 .ofd 后缀（重命名规则默认生成 .pdf）
+      if (/\.ofd$/i.test(inv.fileName || inv.file.name) && /\.pdf$/i.test(name)) {
+        name = name.replace(/\.pdf$/i, '.ofd');
+      }
+      // 同名文件加序号避免覆盖
+      if (used[name] !== undefined) {
+        used[name]++;
+        const dot = name.lastIndexOf('.');
+        name = name.slice(0, dot) + '(' + used[name] + ')' + name.slice(dot);
+      } else {
+        used[name] = 0;
+      }
+      zip.file(name, buf);
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    downloadBlob(blob, '发票重命名打包_' + new Date().toISOString().slice(0, 10) + '.zip');
+    hideLoading();
+    showToast('已打包 ' + list.length + ' 个文件并下载', 'success');
+  } catch (err) {
+    hideLoading();
+    console.error(err);
+    showToast('打包失败: ' + err.message, 'error');
   }
 }
 
 function loadDemoData() {
   state.ledger = DEMO_DATA.map(d => ({ ...d }));
+  saveLedgerNow();
   updateTotalCount();
   renderLedger();
   showToast('已加载 ' + DEMO_DATA.length + ' 条演示数据', 'success');
@@ -516,8 +679,8 @@ async function handleDedupFiles(files) {
   for (let i = 0; i < files.length; i++) {
     try {
       $('loadingText').textContent = '正在识别 ' + (i + 1) + '/' + files.length + ': ' + files[i].name;
-      const { text } = await extractPdfText(files[i]);
-      const invoice = parseInvoiceText(text, files[i].name);
+      const extracted = await extractInvoiceText(files[i]);
+      const invoice = parseInvoiceText(extracted.text || '', files[i].name);
       state.dedup.push(invoice);
     } catch (err) {
       state.dedup.push({ number: '', code: '', date: '', seller: '', amount: '', tax: '', fileName: files[i].name });
@@ -671,6 +834,7 @@ function saveEditModal() {
   // 若销售方全称变了但简称没手动改，自动重新提取
   if (inv.seller && !inv.sellerShort) inv.sellerShort = LC.extractShortName(inv.seller);
   closeEditModal();
+  saveLedgerNow();
   renderLedger();
   renderDedup();
   showToast('已保存修改', 'success');
@@ -859,6 +1023,63 @@ function setupLayoutButtons() {
   });
 }
 
+/* ============ 设置弹窗 ============ */
+
+function openSettings() {
+  const s = AI.getSettings();
+  $('setMyCompany').value = LC.getMyCompany();
+  $('setOcrEnabled').value = s.ocrEnabled ? '1' : '0';
+  $('setOcrRegion').value = s.ocrRegion || 'ap-guangzhou';
+  $('setOcrSecretId').value = s.ocrSecretId || '';
+  $('setOcrSecretKey').value = s.ocrSecretKey || '';
+  $('setLlmEnabled').value = s.llmEnabled ? '1' : '0';
+  $('setLlmBaseUrl').value = s.llmBaseUrl || 'https://api.deepseek.com';
+  $('setLlmModel').value = s.llmModel || 'deepseek-chat';
+  $('setLlmApiKey').value = s.llmApiKey || '';
+  $('settingsModal').hidden = false;
+}
+
+function closeSettings() {
+  $('settingsModal').hidden = true;
+}
+
+function saveSettingsModal() {
+  AI.saveSettings({
+    myCompany: $('setMyCompany').value.trim(),
+    ocrEnabled: $('setOcrEnabled').value === '1',
+    ocrRegion: $('setOcrRegion').value.trim() || 'ap-guangzhou',
+    ocrSecretId: $('setOcrSecretId').value.trim(),
+    ocrSecretKey: $('setOcrSecretKey').value.trim(),
+    llmEnabled: $('setLlmEnabled').value === '1',
+    llmBaseUrl: $('setLlmBaseUrl').value.trim() || 'https://api.deepseek.com',
+    llmModel: $('setLlmModel').value.trim() || 'deepseek-chat',
+    llmApiKey: $('setLlmApiKey').value.trim()
+  });
+  // 公司名变化 → 重算已有发票的「购买方非本公司」备注
+  state.ledger.forEach(inv => {
+    inv.remark = LC.buildRemark(inv);
+  });
+  saveLedgerNow();
+  closeSettings();
+  renderLedger();
+  showToast('设置已保存', 'success');
+}
+
+// 启动时从 IndexedDB 恢复台账
+async function initFromStore() {
+  try {
+    const rows = await Store.loadLedger();
+    if (rows && rows.length > 0) {
+      state.ledger = rows.map(r => { delete r.id; return r; });
+      updateTotalCount();
+      renderLedger();
+      showToast('已恢复本地台账 ' + rows.length + ' 条（重新上传后可打包下载）', 'success');
+    }
+  } catch (err) {
+    console.error('读取本地台账失败:', err);
+  }
+}
+
 function init() {
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => switchPage(tab.dataset.page));
@@ -870,11 +1091,23 @@ function init() {
 
   $('loadDemoBtn').addEventListener('click', loadDemoData);
   $('exportExcelBtn').addEventListener('click', exportLedgerExcel);
+  $('downloadZipBtn').addEventListener('click', downloadLedgerZip);
   $('clearLedgerBtn').addEventListener('click', () => {
     state.ledger = [];
+    Store.clearLedger().catch(err => console.error('清空本地台账失败:', err));
     updateTotalCount();
     renderLedger();
     showToast('已清空台账', 'success');
+  });
+
+  // 筛选栏
+  $('ledgerSearch').addEventListener('input', (e) => {
+    filterState.keyword = e.target.value.trim().toLowerCase();
+    renderLedger();
+  });
+  $('ledgerCategoryFilter').addEventListener('change', (e) => {
+    filterState.category = e.target.value;
+    renderLedger();
   });
 
   $('exportDedupBtn').addEventListener('click', exportDedupExcel);
@@ -894,11 +1127,24 @@ function init() {
   $('editModal').addEventListener('click', (e) => {
     if (e.target === $('editModal')) closeEditModal();
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('editModal').hidden) closeEditModal();
+
+  // 设置弹窗
+  $('settingsBtn').addEventListener('click', openSettings);
+  $('settingsSaveBtn').addEventListener('click', saveSettingsModal);
+  $('settingsCancelBtn').addEventListener('click', closeSettings);
+  $('settingsCloseBtn').addEventListener('click', closeSettings);
+  $('settingsModal').addEventListener('click', (e) => {
+    if (e.target === $('settingsModal')) closeSettings();
   });
 
-  // 费用分类下拉选项（与规则引擎同一数据源）
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!$('editModal').hidden) closeEditModal();
+      else if (!$('settingsModal').hidden) closeSettings();
+    }
+  });
+
+  // 费用分类下拉选项（编辑弹窗 + 筛选栏，同一数据源）
   const catSelect = $('editCategory');
   catSelect.innerHTML = '';
   LC.CATEGORIES.forEach(c => {
@@ -906,6 +1152,13 @@ function init() {
     opt.value = c;
     opt.textContent = c;
     catSelect.appendChild(opt);
+  });
+  const catFilter = $('ledgerCategoryFilter');
+  LC.CATEGORIES.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    catFilter.appendChild(opt);
   });
 
   // 编辑弹窗内的自动生成按钮
@@ -916,6 +1169,9 @@ function init() {
   ['editAmount', 'editTax', 'editSellerShort', 'editDate', 'editNumber'].forEach(id => {
     $(id).addEventListener('input', refreshModalAuto);
   });
+
+  // 启动恢复本地台账
+  initFromStore();
 
   console.log('%c票小帮已启动（台账模式）', 'color:#185fa5;font-size:14px;font-weight:bold');
   console.log('所有文件均在浏览器本地处理，不会上传到服务器');
