@@ -171,20 +171,51 @@ function nameInBlock(clean, blockLabel) {
   const idx = clean.indexOf(blockLabel);
   if (idx < 0) return '';
   const seg = clean.slice(idx + blockLabel.length, idx + blockLabel.length + 260);
-  const m = seg.match(/名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=统一社会信用代码|纳税人识别号|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/);
+  const m = seg.match(/名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=\s*(?:名称[：:]|统一社会信用代码|纳税人识别号|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|销售方信息|购买方信息|销售方|购买方|项目名称|规格型号|购销|买卖|方方|信信|息息|$))/);
   if (!m) return '';
   const name = m[1].replace(/[：:，,。.、\s]/g, '');
   return (name.length >= 2 && name.length <= 40) ? name : '';
 }
 
-// 收集全部"名称：xxx"条目（旧版无块标题的平铺格式）
-function collectNameEntries(clean) {
+// 收集全部"名称：xxx"条目（按行提取，兼容多种版式）
+// 为什么按行而非去空白全文：
+//   左右两栏旧版发票中，"名称:通途...名称:飒贵..."在同一行（干净），
+//   而"购买方信息/销售方信息"竖排拆散成"买卖方方信信"残字在下一行。
+//   若用 clean 全连接，残字会粘到名称后面，正则无法正确切分。
+// 版式兼容：
+//   - 同行两个名称（左右两栏）：lookahead 用"名称[：:]"切分
+//   - 名称标签独占一行（"名称："换行跟公司名）：取下一行
+//   - 个人代开（"名称:张三身份证号:..."）：lookahead 用"身份证号"终止
+function collectNameEntries(rawText) {
   const out = [];
-  const re = /名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=纳税人识别号|统一社会信用代码|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/g;
-  let m;
-  while ((m = re.exec(clean)) !== null) {
-    const n = m[1].replace(/[：:，,。.、\s]/g, '');
-    if (n.length >= 2 && !out.includes(n)) out.push(n);
+  const lines = String(rawText || '').split('\n').map(l => l.trim());
+  // lookahead 终止词：
+  // - 名称[：:]：同行第二个名称
+  // - 销售方信息/购买方信息/销售方/购买方：块标题（防止吃进下一块）
+  // - 项目名称/规格型号：商品明细表头
+  // - 购销/买卖/方方/信信/息息：左右两栏竖排标题的横向残字
+  const re = /名称[：:]\s*([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=\s*(?:名称[：:]|统一社会信用代码|纳税人识别号|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|销售方信息|购买方信息|销售方|购买方|项目名称|规格型号|购销|买卖|方方|信信|息息|$))/g;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l) continue;
+    // 跳过商品明细表头行（"项目名称 规格型号 单位 数量..."）
+    if (/项目名称|货物或应税劳务|服务名称|商品名称|劳务名称/.test(l)) continue;
+    let m, found = false;
+    re.lastIndex = 0;
+    while ((m = re.exec(l)) !== null) {
+      found = true;
+      const n = m[1].replace(/[：:，,。.、\s]/g, '');
+      if (n.length >= 2 && n.length <= 40 && !out.includes(n)) out.push(n);
+    }
+    // "名称："标签独占一行时，公司名在下一行（数电票跨行布局）
+    if (!found && /名称[：:]\s*$/.test(l)) {
+      for (let j = i + 1; j < lines.length && j < i + 3; j++) {
+        if (!lines[j]) continue;
+        const n = lines[j].replace(/[：:，,。.、\s]/g, '');
+        if (n.length >= 2 && n.length <= 40 && !out.includes(n)) out.push(n);
+        break;
+      }
+    }
   }
   return out;
 }
@@ -239,7 +270,7 @@ function parseInvoiceText(rawText, fileName) {
   // 2) 兜底：无块标题的旧版格式（"名称：xxx"平铺）
   //    用"自家公司=购买方"识别，避免按出现顺序假设导致销售方/购买方对调
   if (!invoice.seller || !invoice.buyer) {
-    const names = collectNameEntries(clean).filter(looksLikeCompany);
+    const names = collectNameEntries(rawText).filter(looksLikeCompany);
     const myIdx = names.findIndex(isMyCompany);
     if (myIdx >= 0) {
       // 自家公司 → 购买方；其余第一条 → 销售方
@@ -247,7 +278,7 @@ function parseInvoiceText(rawText, fileName) {
       const others = names.filter((n, i) => i !== myIdx);
       // 公司条目里没有其他名称时，从全量条目里再找（兼容个人代开"名称:张三"）
       invoice.seller = invoice.seller || others[0] ||
-        collectNameEntries(clean).find(n => !isMyCompany(n)) || '';
+        collectNameEntries(rawText).find(n => !isMyCompany(n)) || '';
     } else {
       // 没识别到自家公司（如代开/转开），退回首条=购买方、次条=销售方
       if (!invoice.buyer) invoice.buyer = names[0] || '';

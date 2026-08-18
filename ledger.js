@@ -65,6 +65,9 @@
       if (!l || l.length < 2) return false;
       if (headerRe.test(l)) return false;
       if (l === '合计' || /^合计\s*[¥￥]?/.test(l)) return false;
+      // 过滤纯数字明细行（如"只 5 15.64 78.20 1% 0.78"、"¥78.20 ¥0.78"），只保留商品名称
+      const textOnly = l.replace(/[\d,.¥￥%\/()（）\s]/g, '');
+      if (textOnly.length < 2) return false;
       return true;
     });
     if (rows.length === 0) return '';
