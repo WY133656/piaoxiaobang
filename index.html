@@ -8,7 +8,8 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx-js-style.min.js"></script>
+  <script src="ledger.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -64,20 +65,26 @@
             </div>
           </div>
           <div class="table-wrap">
-            <table class="invoice-table" id="ledgerTable">
+            <table class="invoice-table ledger-table" id="ledgerTable">
               <thead>
                 <tr>
-                  <th style="width:26%">发票号码</th>
-                  <th style="width:12%">开票日期</th>
-                  <th style="width:22%">销售方名称</th>
-                  <th style="width:12%" class="num">金额(元)</th>
-                  <th style="width:11%" class="num">税额(元)</th>
-                  <th style="width:8%" class="center">状态</th>
-                  <th style="width:9%" class="center">操作</th>
+                  <th style="width:8%">发票类型</th>
+                  <th style="width:9%">开票日期</th>
+                  <th style="width:14%">发票号码</th>
+                  <th style="width:13%">销售方名称</th>
+                  <th style="width:8%">销售方简称</th>
+                  <th style="width:12%">商品/项目摘要</th>
+                  <th style="width:7%" class="num">金额(不含税)</th>
+                  <th style="width:6%" class="num">税额</th>
+                  <th style="width:7%" class="num">价税合计</th>
+                  <th style="width:9%" class="center">费用分类</th>
+                  <th style="width:12%">特殊情况说明</th>
+                  <th style="width:12%">重命名后文件名</th>
+                  <th style="width:6%" class="center">操作</th>
                 </tr>
               </thead>
               <tbody id="ledgerBody">
-                <tr class="empty-row"><td colspan="7">上传 PDF 发票后，识别结果将显示在这里</td></tr>
+                <tr class="empty-row"><td colspan="13">上传 PDF 发票后，识别结果将显示在这里</td></tr>
               </tbody>
             </table>
           </div>
@@ -219,30 +226,65 @@
       </div>
       <div class="modal-body">
         <div class="form-grid">
+          <label class="form-item">发票类型
+            <select id="editType">
+              <option value="电子专票">电子专票</option>
+              <option value="电子普票">电子普票</option>
+              <option value="纸质专票">纸质专票</option>
+              <option value="纸质普票">纸质普票</option>
+            </select>
+          </label>
+          <label class="form-item">开票日期
+            <input type="text" id="editDate" placeholder="如 2026年08月15日">
+          </label>
           <label class="form-item">发票号码
             <input type="text" id="editNumber" placeholder="如 2441200000001234567">
           </label>
           <label class="form-item">发票代码（旧版发票）
             <input type="text" id="editCode" placeholder="可留空">
           </label>
-          <label class="form-item">开票日期
-            <input type="text" id="editDate" placeholder="如 2026年08月15日">
-          </label>
-          <label class="form-item">金额(元)
-            <input type="text" id="editAmount" placeholder="如 1280.00">
-          </label>
           <label class="form-item form-full">销售方名称
             <input type="text" id="editSeller" placeholder="公司全称">
           </label>
-          <label class="form-item form-full">购买方名称
+          <label class="form-item">销售方简称
+            <div class="input-with-btn">
+              <input type="text" id="editSellerShort" placeholder="如 星辰科技">
+              <button type="button" class="auto-btn" id="autoShortBtn">自动生成</button>
+            </div>
+          </label>
+          <label class="form-item">购买方名称
             <input type="text" id="editBuyer" placeholder="公司全称">
           </label>
-          <label class="form-item form-full">税额(元)
+          <label class="form-item form-full">商品/项目摘要
+            <input type="text" id="editSummary" placeholder="识别到的商品或服务项目">
+          </label>
+          <label class="form-item">金额(不含税)
+            <input type="text" id="editAmount" placeholder="如 1280.00">
+          </label>
+          <label class="form-item">税额
             <input type="text" id="editTax" placeholder="如 76.80">
+          </label>
+          <label class="form-item">费用分类
+            <select id="editCategory"></select>
+          </label>
+          <label class="form-item">价税合计
+            <div class="total-display" id="editTotal">0.00</div>
+          </label>
+          <label class="form-item form-full">特殊情况说明
+            <div class="input-with-btn">
+              <input type="text" id="editRemark" placeholder="自动生成，可手动修改">
+              <button type="button" class="auto-btn" id="autoRemarkBtn">自动生成</button>
+            </div>
+          </label>
+          <label class="form-item form-full">重命名后文件名
+            <div class="input-with-btn">
+              <input type="text" id="editNewName" placeholder="如 电子专票+20260815+2441...+星辰科技+1356.80.pdf">
+              <button type="button" class="auto-btn" id="autoNameBtn">自动生成</button>
+            </div>
           </label>
         </div>
         <div class="modal-file">来源文件：<span id="editFileName"></span></div>
-        <div class="modal-hint">识别不到或识别错的字段可以直接修改，保存后会自动更新台账和查重结果。</div>
+        <div class="modal-hint">识别不到的字段可以直接修改；金额/税额变化会自动重算合计，简称/日期/号码变化会自动更新文件名。</div>
       </div>
       <div class="modal-footer">
         <button class="btn" id="editCancelBtn">取消</button>

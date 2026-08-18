@@ -316,6 +316,11 @@ body {
   font-size: 11px;
 }
 
+.invoice-table tr.incomplete td {
+  background: var(--bg-warning);
+  color: var(--color-warning);
+}
+
 .invoice-table tr.duplicate {
   background: var(--bg-danger);
 }
@@ -398,7 +403,7 @@ body {
   background: var(--bg-card);
   border-radius: var(--radius-lg);
   width: 100%;
-  max-width: 560px;
+  max-width: 700px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
   max-height: 90vh;
   display: flex;
@@ -469,6 +474,77 @@ body {
   outline: none;
   border-color: var(--color-info);
   box-shadow: 0 0 0 2px var(--bg-info);
+}
+
+.form-item select {
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-card);
+}
+
+.form-item select:focus {
+  outline: none;
+  border-color: var(--color-info);
+  box-shadow: 0 0 0 2px var(--bg-info);
+}
+
+/* 输入框 + 自动生成按钮组合 */
+.input-with-btn {
+  display: flex;
+  gap: 8px;
+}
+
+.input-with-btn input {
+  flex: 1;
+  min-width: 0;
+}
+
+.auto-btn {
+  flex-shrink: 0;
+  padding: 0 14px;
+  border: 1px solid var(--color-info);
+  background: var(--bg-info);
+  color: var(--color-info);
+  font-size: 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.auto-btn:hover {
+  background: var(--color-info);
+  color: #fff;
+}
+
+/* 价税合计只读显示 */
+.total-display {
+  padding: 8px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-info);
+  background: var(--bg-secondary);
+  font-family: "SF Mono", "Consolas", "Menlo", monospace;
+}
+
+/* 表格单元格超长省略 */
+.cell-ellipsis {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 台账表格 13 列较宽，容器内横向滚动 */
+.ledger-table {
+  min-width: 1440px;
 }
 
 .modal-file {

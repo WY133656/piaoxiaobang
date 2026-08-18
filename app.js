@@ -3,7 +3,8 @@
 const PDFJS = window.pdfjsLib;
 PDFJS.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const { PDFDocument, rgb, degrees } = PDFLib;
+const { PDFDocument, rgb } = PDFLib;
+const LC = window.LedgerCore; // 台账规则引擎（ledger.js）
 
 const state = {
   ledger: [],
@@ -15,12 +16,12 @@ const state = {
 };
 
 const DEMO_DATA = [
-  { number: '2441200000001234567', code: '', date: '2026年08月15日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技.pdf' },
-  { number: '2441200000002345678', code: '', date: '2026年08月15日', seller: '北京云端数据服务有限公司', buyer: '深圳市-example有限公司', amount: '3560.00', tax: '213.60', fileName: '发票-云端数据.pdf' },
-  { number: '2441200000001234567', code: '', date: '2026年08月14日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技(副本).pdf' },
-  { number: '2441200000003456789', code: '', date: '2026年08月13日', seller: '上海明远办公用品商行', buyer: '深圳市-example有限公司', amount: '458.00', tax: '27.48', fileName: '发票-明远办公.pdf' },
-  { number: '2441200000004567890', code: '', date: '2026年08月12日', seller: '广州市速达信息技术有限公司', buyer: '深圳市-example有限公司', amount: '2300.00', tax: '138.00', fileName: '发票-速达信息.pdf' }
-];
+  { number: '2441200000001234567', code: '', date: '2026年08月15日', seller: '深圳市星辰科技有限公司', buyer: '浙江通途数科建设有限公司', amount: '1280.00', tax: '76.80', summary: '激光打印机 台 1 1280.00 13% 166.40', fileName: '发票-星辰科技.pdf' },
+  { number: '2441200000002345678', code: '', date: '2026年08月15日', seller: '北京云端数据服务有限公司', buyer: '浙江通途数科建设有限公司', amount: '3560.00', tax: '213.60', summary: '服务器托管服务 项 1 3560.00 6% 213.60', fileName: '发票-云端数据.pdf' },
+  { number: '2441200000001234567', code: '', date: '2026年08月14日', seller: '深圳市星辰科技有限公司', buyer: '浙江通途数科建设有限公司', amount: '1280.00', tax: '76.80', summary: '激光打印机 台 1 1280.00 13% 166.40', fileName: '发票-星辰科技(副本).pdf' },
+  { number: '2441200000003456789', code: '', date: '2026年08月13日', seller: '昆明空港经济区赵记餐馆', buyer: '浙江通途数科建设有限公司', amount: '458.00', tax: '27.48', summary: '餐饮服务 1 458.00 6% 27.48', fileName: '发票-明远办公.pdf' },
+  { number: '2441200000004567890', code: '', date: '2026年08月12日', seller: '慈溪市格下聚腾电器有限公司', buyer: '浙江通途数科建设有限公司', amount: '2300.00', tax: '138.00', summary: '照明灯具 套 10 230.00 13% 299.00', fileName: '发票-速达信息.pdf' }
+].map(d => LC.enrichInvoice(d, ''));
 
 function $(id) { return document.getElementById(id); }
 
@@ -42,7 +43,7 @@ function hideLoading() {
 }
 
 function formatAmount(str) {
-  if (!str) return '-';
+  if (str === undefined || str === null || str === '') return '-';
   const num = parseFloat(String(str).replace(/,/g, ''));
   if (isNaN(num)) return str;
   return num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -267,14 +268,20 @@ function dedupKey(inv) {
   return inv.code ? inv.code + '-' + inv.number : inv.number;
 }
 
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 /* ============ 台账管理 ============ */
+
+const LEDGER_COLS = 13;
 
 function renderLedger() {
   const body = $('ledgerBody');
   const list = state.ledger;
 
   if (list.length === 0) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="7">上传 PDF 发票后，识别结果将显示在这里</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="' + LEDGER_COLS + '">上传 PDF 发票后，识别结果将显示在这里</td></tr>';
     $('ledgerMeta').textContent = '暂无数据';
     $('exportExcelBtn').disabled = true;
     $('clearLedgerBtn').disabled = true;
@@ -286,15 +293,22 @@ function renderLedger() {
   list.forEach((inv, idx) => {
     const isDup = dupNumbers.has(dedupKey(inv));
     const complete = invoiceIsComplete(inv);
-    const tagClass = isDup ? 'tag-danger' : (complete ? 'tag-success' : 'tag-warning');
-    const tagText = isDup ? '重复' : (complete ? '已识别' : '待补');
-    html += '<tr class="' + (isDup ? 'duplicate' : '') + '">' +
-      '<td class="mono">' + (inv.number || '-') + '</td>' +
-      '<td>' + (inv.date || '-') + '</td>' +
-      '<td>' + (inv.seller || '-') + '</td>' +
+    const rowClass = (isDup ? 'duplicate ' : '') + (!complete ? 'incomplete' : '');
+    const catClass = !inv.category || inv.category === '待确认' ? 'tag-warning' : 'tag-info';
+    const total = LC.totalOf(inv);
+    html += '<tr class="' + rowClass + '">' +
+      '<td>' + esc(inv.invoiceType || '电子普票') + '</td>' +
+      '<td>' + esc(LC.formatDateDash(inv.date)) + '</td>' +
+      '<td class="mono">' + esc(inv.number || '-') + '</td>' +
+      '<td title="' + esc(inv.seller) + '">' + esc(inv.seller || '-') + '</td>' +
+      '<td>' + esc(inv.sellerShort || '-') + '</td>' +
+      '<td class="cell-ellipsis" title="' + esc(inv.summary) + '">' + esc(inv.summary || '-') + '</td>' +
       '<td class="num">' + formatAmount(inv.amount) + '</td>' +
       '<td class="num">' + formatAmount(inv.tax) + '</td>' +
-      '<td class="center"><span class="tag ' + tagClass + '">' + tagText + '</span></td>' +
+      '<td class="num">' + formatAmount(total) + '</td>' +
+      '<td class="center"><span class="tag ' + catClass + '">' + esc(inv.category || '待确认') + '</span></td>' +
+      '<td class="cell-ellipsis" title="' + esc(inv.remark) + '">' + esc(inv.remark || '-') + '</td>' +
+      '<td class="cell-ellipsis" title="' + esc(inv.newName) + '">' + esc(inv.newName || '-') + '</td>' +
       '<td class="center"><button class="edit-btn" data-list="ledger" data-idx="' + idx + '">编辑</button></td>' +
       '</tr>';
   });
@@ -302,11 +316,13 @@ function renderLedger() {
 
   const dupCount = list.filter(inv => dupNumbers.has(dedupKey(inv))).length;
   const incompleteCount = list.filter(inv => !invoiceIsComplete(inv)).length;
+  const confirmCount = list.filter(inv => !inv.category || inv.category === '待确认').length;
   let meta = '共 ' + list.length + ' 张';
   if (dupCount > 0) meta += '，发现 ' + dupCount + ' 张重复';
   if (incompleteCount > 0) meta += '，' + incompleteCount + ' 张待补全';
+  if (confirmCount > 0) meta += '，' + confirmCount + ' 张待确认分类';
   $('ledgerMeta').textContent = meta;
-  $('ledgerMeta').className = 'result-meta' + (dupCount > 0 || incompleteCount > 0 ? ' warn' : '');
+  $('ledgerMeta').className = 'result-meta' + (dupCount > 0 || incompleteCount > 0 || confirmCount > 0 ? ' warn' : '');
   $('exportExcelBtn').disabled = false;
   $('clearLedgerBtn').disabled = false;
 
@@ -334,17 +350,22 @@ async function handleLedgerFiles(files) {
       $('loadingText').textContent = '正在识别 ' + (i + 1) + '/' + files.length + ': ' + files[i].name;
       const { text } = await extractPdfText(files[i]);
       const invoice = parseInvoiceText(text, files[i].name);
+      // 用台账规则引擎补齐：发票类型/摘要/简称/费用分类/特殊情况说明/重命名文件名
+      LC.enrichInvoice(invoice, text);
       if (invoice.number || invoice.amount) {
         state.ledger.push(invoice);
         success++;
       } else {
-        const fallback = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name };
+        const fallback = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: files[i].name };
+        LC.enrichInvoice(fallback, text);
         state.ledger.push(fallback);
         fail++;
       }
     } catch (err) {
       console.error('解析失败:', files[i].name, err);
-      state.ledger.push({ number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name });
+      const fb = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', summary: '', invoiceType: '', category: '', fileName: files[i].name };
+      LC.enrichInvoice(fb, '');
+      state.ledger.push(fb);
       fail++;
     }
   }
@@ -369,24 +390,15 @@ function loadDemoData() {
 
 function exportLedgerExcel() {
   if (state.ledger.length === 0) return;
-  const dupNumbers = findDuplicates(state.ledger);
-  const data = state.ledger.map(inv => ({
-    '发票号码': inv.number || '',
-    '发票代码': inv.code || '',
-    '开票日期': inv.date || '',
-    '销售方名称': inv.seller || '',
-    '购买方名称': inv.buyer || '',
-    '金额(元)': inv.amount || '',
-    '税额(元)': inv.tax || '',
-    '是否重复': dupNumbers.has(dedupKey(inv)) ? '是' : '否',
-    '文件名': inv.fileName || ''
-  }));
-  const ws = XLSX.utils.json_to_sheet(data);
-  ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 16 }, { wch: 28 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 24 }];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '发票台账');
-  XLSX.writeFile(wb, '发票台账_' + new Date().toISOString().slice(0, 10) + '.xlsx');
-  showToast('已导出 Excel 文件', 'success');
+  try {
+    const wb = LC.buildLedgerWorkbook(state.ledger, '发票台账');
+    if (!wb) { showToast('导出失败：Excel 库未就绪', 'error'); return; }
+    XLSX.writeFile(wb, '发票台账_' + new Date().toISOString().slice(0, 10) + '.xlsx', { cellStyles: true });
+    showToast('已导出 14 列样式台账 Excel 文件', 'success');
+  } catch (err) {
+    console.error(err);
+    showToast('导出失败: ' + err.message, 'error');
+  }
 }
 
 /* ============ 发票查重 ============ */
@@ -409,9 +421,9 @@ function renderDedup() {
     const isDup = dupNumbers.has(dedupKey(inv));
     const count = inv.number ? list.filter(x => dedupKey(x) === dedupKey(inv)).length : 1;
     html += '<tr class="' + (isDup ? 'duplicate' : '') + '">' +
-      '<td class="mono">' + (inv.number || '-') + '</td>' +
-      '<td>' + (inv.date || '-') + '</td>' +
-      '<td>' + (inv.seller || '-') + '</td>' +
+      '<td class="mono">' + esc(inv.number || '-') + '</td>' +
+      '<td>' + esc(LC.formatDateDash(inv.date)) + '</td>' +
+      '<td>' + esc(inv.seller || '-') + '</td>' +
       '<td class="num">' + formatAmount(inv.amount) + '</td>' +
       '<td class="center"><span class="tag ' + (isDup ? 'tag-danger' : 'tag-success') + '">' + (isDup ? '重复' : '正常') + '</span></td>' +
       '<td class="center">' + count + '</td>' +
@@ -470,7 +482,7 @@ function exportDedupExcel() {
     return {
       '发票号码': inv.number || '',
       '发票代码': inv.code || '',
-      '开票日期': inv.date || '',
+      '开票日期': LC.formatDateDash(inv.date),
       '销售方名称': inv.seller || '',
       '金额(元)': inv.amount || '',
       '是否重复': dupNumbers.has(dedupKey(inv)) ? '是' : '否',
@@ -486,20 +498,46 @@ function exportDedupExcel() {
   showToast('已导出 Excel 文件', 'success');
 }
 
-/* ============ 手动编辑修正 ============ */
+/* ============ 手动编辑修正（台账模式：14 字段全可编辑） ============ */
 
 let editingContext = null;
 
+// 从弹窗当前值构造临时发票对象（用于自动重算）
+function modalTempInvoice(base) {
+  const inv = { ...(base || {}) };
+  inv.invoiceType = $('editType').value;
+  inv.number = $('editNumber').value.trim();
+  inv.code = $('editCode').value.trim();
+  inv.date = $('editDate').value.trim();
+  inv.seller = $('editSeller').value.trim();
+  inv.sellerShort = $('editSellerShort').value.trim();
+  inv.buyer = $('editBuyer').value.trim();
+  inv.summary = $('editSummary').value.trim();
+  inv.amount = $('editAmount').value.trim();
+  inv.tax = $('editTax').value.trim();
+  inv.category = $('editCategory').value;
+  inv.remark = $('editRemark').value.trim();
+  inv.newName = $('editNewName').value.trim();
+  return inv;
+}
+
 function openEditModal(listKey, index) {
   const inv = state[listKey][index];
+  $('editType').value = inv.invoiceType || '电子普票';
   $('editNumber').value = inv.number || '';
   $('editCode').value = inv.code || '';
   $('editDate').value = inv.date || '';
   $('editSeller').value = inv.seller || '';
+  $('editSellerShort').value = inv.sellerShort || '';
   $('editBuyer').value = inv.buyer || '';
+  $('editSummary').value = inv.summary || '';
   $('editAmount').value = inv.amount || '';
   $('editTax').value = inv.tax || '';
+  $('editCategory').value = inv.category || '待确认';
+  $('editRemark').value = inv.remark || '';
+  $('editNewName').value = inv.newName || '';
   $('editFileName').textContent = inv.fileName || '';
+  refreshModalTotal();
   editingContext = { listKey, index };
   $('editModal').hidden = false;
 }
@@ -509,17 +547,59 @@ function closeEditModal() {
   editingContext = null;
 }
 
+function refreshModalTotal() {
+  const amt = parseFloat($('editAmount').value) || 0;
+  const tax = parseFloat($('editTax').value) || 0;
+  $('editTotal').textContent = formatAmount(amt + tax);
+}
+
+// 自动生成简称
+function autoShort() {
+  const full = $('editSeller').value.trim();
+  $('editSellerShort').value = LC.extractShortName(full);
+  refreshModalAuto();
+}
+
+// 自动生成特殊情况说明
+function autoRemark() {
+  const inv = modalTempInvoice(state[editingContext.listKey][editingContext.index]);
+  $('editRemark').value = LC.buildRemark(inv);
+  refreshModalAuto();
+}
+
+// 自动生成重命名文件名
+function autoNewName() {
+  const inv = modalTempInvoice(state[editingContext.listKey][editingContext.index]);
+  $('editNewName').value = LC.buildNewName(inv);
+}
+
+// 编辑时联动重算：金额/税额变化 → 合计；简称/日期/号码变化 → 文件名
+function refreshModalAuto() {
+  refreshModalTotal();
+  const inv = modalTempInvoice(state[editingContext ? editingContext.listKey : 'ledger'][editingContext ? editingContext.index : 0]);
+  const name = LC.buildNewName(inv);
+  if (name) $('editNewName').value = name;
+}
+
 function saveEditModal() {
   if (!editingContext) return;
   const { listKey, index } = editingContext;
   const inv = state[listKey][index];
+  inv.invoiceType = $('editType').value;
   inv.number = $('editNumber').value.trim();
   inv.code = $('editCode').value.trim();
   inv.date = $('editDate').value.trim();
   inv.seller = $('editSeller').value.trim();
+  inv.sellerShort = $('editSellerShort').value.trim();
   inv.buyer = $('editBuyer').value.trim();
+  inv.summary = $('editSummary').value.trim();
   inv.amount = $('editAmount').value.trim();
   inv.tax = $('editTax').value.trim();
+  inv.category = $('editCategory').value;
+  inv.remark = $('editRemark').value.trim();
+  inv.newName = $('editNewName').value.trim();
+  // 若销售方全称变了但简称没手动改，自动重新提取
+  if (inv.seller && !inv.sellerShort) inv.sellerShort = LC.extractShortName(inv.seller);
   closeEditModal();
   renderLedger();
   renderDedup();
@@ -547,7 +627,7 @@ function renderMergeFileList() {
   let html = '';
   state.mergeFiles.forEach((f, i) => {
     html += '<div class="merge-file-item">' +
-      '<span class="file-name" title="' + f.name + '">' + (i + 1) + '. ' + f.name + '</span>' +
+      '<span class="file-name" title="' + esc(f.name) + '">' + (i + 1) + '. ' + esc(f.name) + '</span>' +
       '<button class="file-remove" data-idx="' + i + '">×</button>' +
       '</div>';
   });
@@ -748,7 +828,26 @@ function init() {
     if (e.key === 'Escape' && !$('editModal').hidden) closeEditModal();
   });
 
-  console.log('%c票小帮已启动', 'color:#185fa5;font-size:14px;font-weight:bold');
+  // 费用分类下拉选项（与规则引擎同一数据源）
+  const catSelect = $('editCategory');
+  catSelect.innerHTML = '';
+  LC.CATEGORIES.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    catSelect.appendChild(opt);
+  });
+
+  // 编辑弹窗内的自动生成按钮
+  $('autoShortBtn').addEventListener('click', autoShort);
+  $('autoRemarkBtn').addEventListener('click', autoRemark);
+  $('autoNameBtn').addEventListener('click', autoNewName);
+  // 金额/税额变化时联动刷新合计与文件名
+  ['editAmount', 'editTax', 'editSellerShort', 'editDate', 'editNumber'].forEach(id => {
+    $(id).addEventListener('input', refreshModalAuto);
+  });
+
+  console.log('%c票小帮已启动（台账模式）', 'color:#185fa5;font-size:14px;font-weight:bold');
   console.log('所有文件均在浏览器本地处理，不会上传到服务器');
 }
 
