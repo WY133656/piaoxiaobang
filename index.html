@@ -6,9 +6,10 @@
   <title>票小帮 - PDF发票管理工具</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx-js-style.min.js"></script>
+  <!-- 本地库优先（GitHub Pages 同源托管，不依赖 CDN）；加载失败时自动回退 CDN -->
+  <script src="lib/pdf.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js&quot;><\/script>')"></script>
+  <script src="lib/pdf-lib.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js&quot;><\/script>')"></script>
+  <script src="lib/xlsx.min.js" onerror="this.remove(); document.write('<script src=&quot;https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js&quot;><\/script>')"></script>
   <script src="ledger.js"></script>
 </head>
 <body>

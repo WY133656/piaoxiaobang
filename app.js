@@ -1,7 +1,13 @@
 'use strict';
 
 const PDFJS = window.pdfjsLib;
-PDFJS.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// 本地 worker 优先（同源加载，不依赖 CDN）；本地不可用（如 file:// 协议）时回退 CDN
+if (typeof PDFJS.GlobalWorkerOptions !== 'undefined') {
+  PDFJS.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+  if (location.protocol === 'file:') {
+    PDFJS.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+}
 
 const { PDFDocument, rgb } = PDFLib;
 const LC = window.LedgerCore; // 台账规则引擎（ledger.js）
