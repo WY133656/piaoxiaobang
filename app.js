@@ -15,11 +15,11 @@ const state = {
 };
 
 const DEMO_DATA = [
-  { number: '2441200000001234567', date: '2026年08月15日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技.pdf' },
-  { number: '2441200000002345678', date: '2026年08月15日', seller: '北京云端数据服务有限公司', buyer: '深圳市-example有限公司', amount: '3560.00', tax: '213.60', fileName: '发票-云端数据.pdf' },
-  { number: '2441200000001234567', date: '2026年08月14日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技(副本).pdf' },
-  { number: '2441200000003456789', date: '2026年08月13日', seller: '上海明远办公用品商行', buyer: '深圳市-example有限公司', amount: '458.00', tax: '27.48', fileName: '发票-明远办公.pdf' },
-  { number: '2441200000004567890', date: '2026年08月12日', seller: '广州市速达信息技术有限公司', buyer: '深圳市-example有限公司', amount: '2300.00', tax: '138.00', fileName: '发票-速达信息.pdf' }
+  { number: '2441200000001234567', code: '', date: '2026年08月15日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技.pdf' },
+  { number: '2441200000002345678', code: '', date: '2026年08月15日', seller: '北京云端数据服务有限公司', buyer: '深圳市-example有限公司', amount: '3560.00', tax: '213.60', fileName: '发票-云端数据.pdf' },
+  { number: '2441200000001234567', code: '', date: '2026年08月14日', seller: '深圳市星辰科技有限公司', buyer: '深圳市-example有限公司', amount: '1280.00', tax: '76.80', fileName: '发票-星辰科技(副本).pdf' },
+  { number: '2441200000003456789', code: '', date: '2026年08月13日', seller: '上海明远办公用品商行', buyer: '深圳市-example有限公司', amount: '458.00', tax: '27.48', fileName: '发票-明远办公.pdf' },
+  { number: '2441200000004567890', code: '', date: '2026年08月12日', seller: '广州市速达信息技术有限公司', buyer: '深圳市-example有限公司', amount: '2300.00', tax: '138.00', fileName: '发票-速达信息.pdf' }
 ];
 
 function $(id) { return document.getElementById(id); }
@@ -96,6 +96,8 @@ function setupUpload(boxId, btnId, inputId, handler) {
   });
 }
 
+/* ============ PDF 文本提取（按坐标还原视觉顺序） ============ */
+
 async function extractPdfText(file) {
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await PDFJS.getDocument({ data: arrayBuffer }).promise;
@@ -103,15 +105,63 @@ async function extractPdfText(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const pageText = content.items.map(item => item.str).join('');
-    fullText += pageText + '\n';
+
+    // 按 y 坐标聚合成行（容差 3pt），行内按 x 坐标从左到右排序，
+    // 解决 pdf.js 返回顺序与视觉顺序不一致导致的字段错乱
+    const lineMap = new Map();
+    content.items.forEach(item => {
+      if (!item.str) return;
+      const y = item.transform[5];
+      let key = null;
+      for (const existing of lineMap.keys()) {
+        if (Math.abs(existing - y) < 3) { key = existing; break; }
+      }
+      if (key === null) key = y;
+      if (!lineMap.has(key)) lineMap.set(key, []);
+      lineMap.get(key).push(item);
+    });
+
+    const yKeys = Array.from(lineMap.keys()).sort((a, b) => b - a);
+    yKeys.forEach(k => {
+      const items = lineMap.get(k).sort((a, b) => a.transform[4] - b.transform[4]);
+      fullText += items.map(item => item.str).join(' ') + '\n';
+    });
   }
   return { text: fullText, numPages: pdf.numPages };
 }
 
-function parseInvoiceText(text, fileName) {
+/* ============ 发票字段解析（兼容多格式） ============ */
+
+function normalizeDate(y, m, d) {
+  const yy = String(y).padStart(4, '0');
+  const mm = String(m).padStart(2, '0');
+  const dd = String(d).padStart(2, '0');
+  return yy + '年' + mm + '月' + dd + '日';
+}
+
+// 从指定标签后提取名称，直到遇到下一个字段标签（取最早出现的截断点）
+function extractNameByLabel(clean, labelPatterns, stopPatterns) {
+  for (const lp of labelPatterns) {
+    const lm = clean.match(lp);
+    if (!lm) continue;
+    const start = lm.index + lm[0].length;
+    let seg = clean.slice(start, start + 160);
+    let stopAt = seg.length;
+    for (const sp of stopPatterns) {
+      const sm = seg.match(sp);
+      if (sm && sm.index < stopAt) stopAt = sm.index;
+    }
+    seg = seg.slice(0, stopAt);
+    let name = seg.replace(/[：:，,。.、\s]/g, '').trim();
+    if (name.length >= 2 && name.length <= 40) return name;
+  }
+  return '';
+}
+
+function parseInvoiceText(rawText, fileName) {
   const invoice = {
     number: '',
+    code: '',
     date: '',
     seller: '',
     buyer: '',
@@ -120,42 +170,111 @@ function parseInvoiceText(text, fileName) {
     fileName: fileName || ''
   };
 
-  const cleanText = text.replace(/\s+/g, '');
+  const clean = rawText.replace(/\s+/g, '');
 
-  const numMatch = cleanText.match(/发票号码[：:]*?(\d{18,20})/) || cleanText.match(/(\d{20})/);
+  // ---------- 发票号码 / 发票代码 ----------
+  const codeMatch = clean.match(/发票代码[：:]*?(\d{8,12})/);
+  if (codeMatch) invoice.code = codeMatch[1];
+
+  const numMatch = clean.match(/发票号码[：:]*?(\d{8,20})/) ||
+                   clean.match(/数电票号码[：:]*?(\d{15,20})/) ||
+                   clean.match(/票据号码[：:]*?(\d{8,20})/) ||
+                   clean.match(/(\d{20})/) ||
+                   clean.match(/(\d{15,20})/);
   if (numMatch) invoice.number = numMatch[1];
 
-  const dateMatch = cleanText.match(/开票日期[：:]*(\d{4}年\d{1,2}月\d{1,2}日)/) || cleanText.match(/(\d{4}年\d{1,2}月\d{1,2}日)/);
-  if (dateMatch) invoice.date = dateMatch[1];
+  // ---------- 开票日期 ----------
+  const dateMatch = clean.match(/开票日期[：:]*?(\d{4})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/) ||
+                    clean.match(/(\d{4})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+  if (dateMatch) invoice.date = normalizeDate(dateMatch[1], dateMatch[2], dateMatch[3]);
 
-  const sellerMatch = cleanText.match(/销售方信息.*?名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9]+?)(?:纳税人识别号|统一社会信用代码|$)/);
-  if (sellerMatch) invoice.seller = sellerMatch[1];
+  // ---------- 名称 ----------
+  const stopPatterns = [
+    /销售方信息/, /购买方信息/, /销售方名称/, /购买方名称/, /销售方[：:]/, /购买方[：:]/,
+    /销售方|购买方/, /信息名称/, /纳税人识别号/, /统一社会信用代码/, /开户行及账号/, /开户行/,
+    /地址[，,]?电话/, /地址/, /电话/, /合计金额/, /合计税额/, /价税合计/, /合计/, /金额/, /税额/,
+    /备注/, /收款人/, /开票人/
+  ];
 
-  const buyerMatch = cleanText.match(/购买方信息.*?名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9]+?)(?:纳税人识别号|统一社会信用代码|$)/);
-  if (buyerMatch) invoice.buyer = buyerMatch[1];
+  invoice.seller = extractNameByLabel(clean, [
+    /销售方信息名称[：:]*?/, /销售方名称[：:]*?/, /销方名称[：:]*?/, /销售方[：:]*?名称[：:]*?/, /销售方[：:]*?/
+  ], stopPatterns);
 
-  const taxMatch = cleanText.match(/税\s*额[：:]*[¥￥]?\s*([\d,]+\.\d{2})/);
-  if (taxMatch) invoice.tax = taxMatch[1];
+  invoice.buyer = extractNameByLabel(clean, [
+    /购买方信息名称[：:]*?/, /购买方名称[：:]*?/, /购方名称[：:]*?/, /购买方[：:]*?名称[：:]*?/, /购买方[：:]*?/
+  ], stopPatterns);
 
-  const amtMatch = cleanText.match(/[价合]计金额?[¥￥]?\s*([\d,]+\.\d{2})/) ||
-                   cleanText.match(/价税合计.*?[¥￥]?\s*([\d,]+\.\d{2})/) ||
-                   cleanText.match(/[¥￥]\s*([\d,]+\.\d{2})/);
-  if (amtMatch) invoice.amount = amtMatch[1];
-
-  if (!invoice.seller) {
-    const nameMatch = cleanText.match(/名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9]{4,20}?(?:公司|商行|中心|厂|店|社|院|集团))/);
-    if (nameMatch) invoice.seller = nameMatch[1];
+  // 兼容"名称：xxx"无前缀的旧版格式（按出现顺序区分购买方/销售方）
+  if (!invoice.seller || !invoice.buyer) {
+    const nameMatches = [];
+    const nameRe = /名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=纳税人识别号|统一社会信用代码|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/g;
+    let m;
+    while ((m = nameRe.exec(clean)) !== null) nameMatches.push(m[1]);
+    if (nameMatches.length >= 2) {
+      if (!invoice.buyer) invoice.buyer = nameMatches[0];
+      if (!invoice.seller) invoice.seller = nameMatches[1];
+    } else if (nameMatches.length === 1) {
+      if (!invoice.seller && !invoice.buyer) invoice.seller = nameMatches[0];
+    }
   }
+
+  // ---------- 金额 / 税额 ----------
+  // 金额优先取"合计金额"（数电票，与台账口径一致），其次价税合计（旧版发票含税总额）
+  const amtMatch = clean.match(/合计金额[¥￥]?\s*([\d,]+\.\d{2})/) ||
+                   clean.match(/价税合计[（(]小写[）)][¥￥]?\s*([\d,]+\.\d{2})/) ||
+                   clean.match(/价税合计[¥￥]?\s*([\d,]+\.\d{2})/) ||
+                   clean.match(/价税合计[（(]大写[）)][^¥￥]*[¥￥]?\s*([\d,]+\.\d{2})/) ||
+                   clean.match(/合计\s*[¥￥]?\s*([\d,]+\.\d{2})/) ||
+                   clean.match(/[¥￥]\s*([\d,]+\.\d{2})/);
+  if (amtMatch) invoice.amount = amtMatch[1].replace(/,/g, '');
+
+  let taxMatch = clean.match(/合计税额[¥￥]?\s*([\d,]+\.\d{2})/) ||
+                 clean.match(/税额[¥￥]?\s*([\d,]+\.\d{2})/);
+  if (!taxMatch && invoice.amount) {
+    // 若金额来自"合计金额"，且存在"价税合计(小写)"，税额 = 价税合计 - 金额
+    const totalMatch = clean.match(/价税合计[（(]小写[）)][¥￥]?\s*([\d,]+\.\d{2})/);
+    if (totalMatch) {
+      const diff = parseFloat(totalMatch[1].replace(/,/g, '')) - parseFloat(invoice.amount.replace(/,/g, ''));
+      if (diff > 0 && diff < parseFloat(invoice.amount.replace(/,/g, ''))) {
+        taxMatch = [null, diff.toFixed(2)];
+      }
+    }
+  }
+  if (!taxMatch) {
+    // 兜底：纸质专票表格里"税额"标签后数字不紧邻，取其后一段内最小的金额数字（税额恒小于金额/价税合计）
+    const taxIdx = clean.indexOf('税额');
+    if (taxIdx >= 0) {
+      const seg = clean.slice(taxIdx, taxIdx + 120);
+      const nums = seg.match(/([\d,]+\.\d{2})/g);
+      if (nums && nums.length) {
+        const min = nums.reduce((a, b) =>
+          parseFloat(b.replace(/,/g, '')) < parseFloat(a.replace(/,/g, '')) ? b : a, nums[0]);
+        taxMatch = [null, min];
+      }
+    }
+  }
+  if (taxMatch) invoice.tax = taxMatch[1].replace(/,/g, '');
 
   return invoice;
 }
+
+// 判断字段是否识别完整
+function invoiceIsComplete(inv) {
+  return !!(inv.number && inv.date && inv.seller && inv.amount);
+}
+
+function dedupKey(inv) {
+  return inv.code ? inv.code + '-' + inv.number : inv.number;
+}
+
+/* ============ 台账管理 ============ */
 
 function renderLedger() {
   const body = $('ledgerBody');
   const list = state.ledger;
 
   if (list.length === 0) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="6">上传 PDF 发票后，识别结果将显示在这里</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="7">上传 PDF 发票后，识别结果将显示在这里</td></tr>';
     $('ledgerMeta').textContent = '暂无数据';
     $('exportExcelBtn').disabled = true;
     $('clearLedgerBtn').disabled = true;
@@ -164,30 +283,41 @@ function renderLedger() {
 
   const dupNumbers = findDuplicates(list);
   let html = '';
-  list.forEach((inv) => {
-    const isDup = dupNumbers.has(inv.number);
+  list.forEach((inv, idx) => {
+    const isDup = dupNumbers.has(dedupKey(inv));
+    const complete = invoiceIsComplete(inv);
+    const tagClass = isDup ? 'tag-danger' : (complete ? 'tag-success' : 'tag-warning');
+    const tagText = isDup ? '重复' : (complete ? '已识别' : '待补');
     html += '<tr class="' + (isDup ? 'duplicate' : '') + '">' +
       '<td class="mono">' + (inv.number || '-') + '</td>' +
       '<td>' + (inv.date || '-') + '</td>' +
       '<td>' + (inv.seller || '-') + '</td>' +
       '<td class="num">' + formatAmount(inv.amount) + '</td>' +
       '<td class="num">' + formatAmount(inv.tax) + '</td>' +
-      '<td class="center"><span class="tag ' + (isDup ? 'tag-danger' : 'tag-success') + '">' + (isDup ? '重复' : '已识别') + '</span></td>' +
+      '<td class="center"><span class="tag ' + tagClass + '">' + tagText + '</span></td>' +
+      '<td class="center"><button class="edit-btn" data-list="ledger" data-idx="' + idx + '">编辑</button></td>' +
       '</tr>';
   });
   body.innerHTML = html;
 
-  const dupCount = list.filter(inv => dupNumbers.has(inv.number)).length;
-  $('ledgerMeta').textContent = '共 ' + list.length + ' 张' + (dupCount > 0 ? '，发现 ' + dupCount + ' 张重复' : '');
-  $('ledgerMeta').className = 'result-meta' + (dupCount > 0 ? ' warn' : '');
+  const dupCount = list.filter(inv => dupNumbers.has(dedupKey(inv))).length;
+  const incompleteCount = list.filter(inv => !invoiceIsComplete(inv)).length;
+  let meta = '共 ' + list.length + ' 张';
+  if (dupCount > 0) meta += '，发现 ' + dupCount + ' 张重复';
+  if (incompleteCount > 0) meta += '，' + incompleteCount + ' 张待补全';
+  $('ledgerMeta').textContent = meta;
+  $('ledgerMeta').className = 'result-meta' + (dupCount > 0 || incompleteCount > 0 ? ' warn' : '');
   $('exportExcelBtn').disabled = false;
   $('clearLedgerBtn').disabled = false;
+
+  bindEditButtons();
 }
 
 function findDuplicates(list) {
   const counts = {};
   list.forEach(inv => {
-    if (inv.number) counts[inv.number] = (counts[inv.number] || 0) + 1;
+    const key = dedupKey(inv);
+    if (key) counts[key] = (counts[key] || 0) + 1;
   });
   const dups = new Set();
   for (const k in counts) {
@@ -208,13 +338,13 @@ async function handleLedgerFiles(files) {
         state.ledger.push(invoice);
         success++;
       } else {
-        const fallback = { number: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name };
+        const fallback = { number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name };
         state.ledger.push(fallback);
         fail++;
       }
     } catch (err) {
       console.error('解析失败:', files[i].name, err);
-      state.ledger.push({ number: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name });
+      state.ledger.push({ number: '', code: '', date: '', seller: '', buyer: '', amount: '', tax: '', fileName: files[i].name });
       fail++;
     }
   }
@@ -224,7 +354,7 @@ async function handleLedgerFiles(files) {
   if (success > 0 && fail === 0) {
     showToast('成功识别 ' + success + ' 张发票', 'success');
   } else if (success > 0 && fail > 0) {
-    showToast('识别完成: ' + success + ' 张成功, ' + fail + ' 张未提取到信息', 'error');
+    showToast('识别完成: ' + success + ' 张成功, ' + fail + ' 张待补全', 'error');
   } else {
     showToast('未能从 PDF 中提取发票信息（可能是扫描件）', 'error');
   }
@@ -242,28 +372,31 @@ function exportLedgerExcel() {
   const dupNumbers = findDuplicates(state.ledger);
   const data = state.ledger.map(inv => ({
     '发票号码': inv.number || '',
+    '发票代码': inv.code || '',
     '开票日期': inv.date || '',
     '销售方名称': inv.seller || '',
     '购买方名称': inv.buyer || '',
     '金额(元)': inv.amount || '',
     '税额(元)': inv.tax || '',
-    '是否重复': dupNumbers.has(inv.number) ? '是' : '否',
+    '是否重复': dupNumbers.has(dedupKey(inv)) ? '是' : '否',
     '文件名': inv.fileName || ''
   }));
   const ws = XLSX.utils.json_to_sheet(data);
-  ws['!cols'] = [{ wch: 22 }, { wch: 16 }, { wch: 28 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 24 }];
+  ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 16 }, { wch: 28 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 24 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '发票台账');
   XLSX.writeFile(wb, '发票台账_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   showToast('已导出 Excel 文件', 'success');
 }
 
+/* ============ 发票查重 ============ */
+
 function renderDedup() {
   const body = $('dedupBody');
   const list = state.dedup;
 
   if (list.length === 0) {
-    body.innerHTML = '<tr class="empty-row"><td colspan="6">上传发票后将自动进行查重比对</td></tr>';
+    body.innerHTML = '<tr class="empty-row"><td colspan="7">上传发票后将自动进行查重比对</td></tr>';
     $('dedupMeta').textContent = '暂无数据';
     $('exportDedupBtn').disabled = true;
     $('clearDedupBtn').disabled = true;
@@ -272,9 +405,9 @@ function renderDedup() {
 
   const dupNumbers = findDuplicates(list);
   let html = '';
-  list.forEach((inv) => {
-    const isDup = dupNumbers.has(inv.number);
-    const count = inv.number ? list.filter(x => x.number === inv.number).length : 1;
+  list.forEach((inv, idx) => {
+    const isDup = dupNumbers.has(dedupKey(inv));
+    const count = inv.number ? list.filter(x => dedupKey(x) === dedupKey(inv)).length : 1;
     html += '<tr class="' + (isDup ? 'duplicate' : '') + '">' +
       '<td class="mono">' + (inv.number || '-') + '</td>' +
       '<td>' + (inv.date || '-') + '</td>' +
@@ -282,16 +415,18 @@ function renderDedup() {
       '<td class="num">' + formatAmount(inv.amount) + '</td>' +
       '<td class="center"><span class="tag ' + (isDup ? 'tag-danger' : 'tag-success') + '">' + (isDup ? '重复' : '正常') + '</span></td>' +
       '<td class="center">' + count + '</td>' +
+      '<td class="center"><button class="edit-btn" data-list="dedup" data-idx="' + idx + '">编辑</button></td>' +
       '</tr>';
   });
   body.innerHTML = html;
 
-  const dupCount = list.filter(inv => dupNumbers.has(inv.number)).length;
-  const uniqueDupGroups = Object.keys(findDuplicates(list) ? {} : {}).length;
+  const dupCount = list.filter(inv => dupNumbers.has(dedupKey(inv))).length;
   $('dedupMeta').textContent = '共 ' + list.length + ' 张，重复 ' + dupCount + ' 张';
   $('dedupMeta').className = 'result-meta' + (dupCount > 0 ? ' warn' : '');
   $('exportDedupBtn').disabled = false;
   $('clearDedupBtn').disabled = false;
+
+  bindEditButtons();
 }
 
 async function handleDedupFiles(files) {
@@ -303,12 +438,12 @@ async function handleDedupFiles(files) {
       const invoice = parseInvoiceText(text, files[i].name);
       state.dedup.push(invoice);
     } catch (err) {
-      state.dedup.push({ number: '', date: '', seller: '', amount: '', tax: '', fileName: files[i].name });
+      state.dedup.push({ number: '', code: '', date: '', seller: '', amount: '', tax: '', fileName: files[i].name });
     }
   }
   hideLoading();
   renderDedup();
-  const dupCount = state.dedup.filter(inv => findDuplicates(state.dedup).has(inv.number)).length;
+  const dupCount = state.dedup.filter(inv => findDuplicates(state.dedup).has(dedupKey(inv))).length;
   if (dupCount > 0) {
     showToast('发现 ' + dupCount + ' 张重复发票', 'error');
   } else {
@@ -323,7 +458,7 @@ function dedupFromLedger() {
   }
   state.dedup = state.ledger.map(d => ({ ...d }));
   renderDedup();
-  const dupCount = state.dedup.filter(inv => findDuplicates(state.dedup).has(inv.number)).length;
+  const dupCount = state.dedup.filter(inv => findDuplicates(state.dedup).has(dedupKey(inv))).length;
   showToast('已从台账导入 ' + state.dedup.length + ' 张' + (dupCount > 0 ? '，发现 ' + dupCount + ' 张重复' : ''), dupCount > 0 ? 'error' : 'success');
 }
 
@@ -331,24 +466,75 @@ function exportDedupExcel() {
   if (state.dedup.length === 0) return;
   const dupNumbers = findDuplicates(state.dedup);
   const data = state.dedup.map(inv => {
-    const count = inv.number ? state.dedup.filter(x => x.number === inv.number).length : 1;
+    const count = inv.number ? state.dedup.filter(x => dedupKey(x) === dedupKey(inv)).length : 1;
     return {
       '发票号码': inv.number || '',
+      '发票代码': inv.code || '',
       '开票日期': inv.date || '',
       '销售方名称': inv.seller || '',
       '金额(元)': inv.amount || '',
-      '是否重复': dupNumbers.has(inv.number) ? '是' : '否',
+      '是否重复': dupNumbers.has(dedupKey(inv)) ? '是' : '否',
       '重复次数': count,
       '文件名': inv.fileName || ''
     };
   });
   const ws = XLSX.utils.json_to_sheet(data);
-  ws['!cols'] = [{ wch: 22 }, { wch: 16 }, { wch: 28 }, { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 24 }];
+  ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 16 }, { wch: 28 }, { wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 24 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '查重结果');
   XLSX.writeFile(wb, '查重结果_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   showToast('已导出 Excel 文件', 'success');
 }
+
+/* ============ 手动编辑修正 ============ */
+
+let editingContext = null;
+
+function openEditModal(listKey, index) {
+  const inv = state[listKey][index];
+  $('editNumber').value = inv.number || '';
+  $('editCode').value = inv.code || '';
+  $('editDate').value = inv.date || '';
+  $('editSeller').value = inv.seller || '';
+  $('editBuyer').value = inv.buyer || '';
+  $('editAmount').value = inv.amount || '';
+  $('editTax').value = inv.tax || '';
+  $('editFileName').textContent = inv.fileName || '';
+  editingContext = { listKey, index };
+  $('editModal').hidden = false;
+}
+
+function closeEditModal() {
+  $('editModal').hidden = true;
+  editingContext = null;
+}
+
+function saveEditModal() {
+  if (!editingContext) return;
+  const { listKey, index } = editingContext;
+  const inv = state[listKey][index];
+  inv.number = $('editNumber').value.trim();
+  inv.code = $('editCode').value.trim();
+  inv.date = $('editDate').value.trim();
+  inv.seller = $('editSeller').value.trim();
+  inv.buyer = $('editBuyer').value.trim();
+  inv.amount = $('editAmount').value.trim();
+  inv.tax = $('editTax').value.trim();
+  closeEditModal();
+  renderLedger();
+  renderDedup();
+  showToast('已保存修改', 'success');
+}
+
+function bindEditButtons() {
+  document.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openEditModal(btn.dataset.list, parseInt(btn.dataset.idx));
+    });
+  });
+}
+
+/* ============ 合并打印 ============ */
 
 function renderMergeFileList() {
   const list = $('mergeFileList');
@@ -551,6 +737,16 @@ function init() {
 
   $('doMergeBtn').addEventListener('click', doMerge);
   setupLayoutButtons();
+
+  $('editSaveBtn').addEventListener('click', saveEditModal);
+  $('editCancelBtn').addEventListener('click', closeEditModal);
+  $('editCloseBtn').addEventListener('click', closeEditModal);
+  $('editModal').addEventListener('click', (e) => {
+    if (e.target === $('editModal')) closeEditModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('editModal').hidden) closeEditModal();
+  });
 
   console.log('%c票小帮已启动', 'color:#185fa5;font-size:14px;font-weight:bold');
   console.log('所有文件均在浏览器本地处理，不会上传到服务器');

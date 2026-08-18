@@ -67,16 +67,17 @@
             <table class="invoice-table" id="ledgerTable">
               <thead>
                 <tr>
-                  <th style="width:30%">发票号码</th>
-                  <th style="width:14%">开票日期</th>
-                  <th style="width:24%">销售方名称</th>
+                  <th style="width:26%">发票号码</th>
+                  <th style="width:12%">开票日期</th>
+                  <th style="width:22%">销售方名称</th>
                   <th style="width:12%" class="num">金额(元)</th>
-                  <th style="width:12%" class="num">税额(元)</th>
+                  <th style="width:11%" class="num">税额(元)</th>
                   <th style="width:8%" class="center">状态</th>
+                  <th style="width:9%" class="center">操作</th>
                 </tr>
               </thead>
               <tbody id="ledgerBody">
-                <tr class="empty-row"><td colspan="6">上传 PDF 发票后，识别结果将显示在这里</td></tr>
+                <tr class="empty-row"><td colspan="7">上传 PDF 发票后，识别结果将显示在这里</td></tr>
               </tbody>
             </table>
           </div>
@@ -122,16 +123,17 @@
             <table class="invoice-table" id="dedupTable">
               <thead>
                 <tr>
-                  <th style="width:30%">发票号码</th>
-                  <th style="width:14%">开票日期</th>
-                  <th style="width:24%">销售方名称</th>
+                  <th style="width:26%">发票号码</th>
+                  <th style="width:12%">开票日期</th>
+                  <th style="width:22%">销售方名称</th>
                   <th style="width:12%" class="num">金额(元)</th>
                   <th style="width:10%" class="center">状态</th>
-                  <th style="width:10%" class="center">重复次数</th>
+                  <th style="width:9%" class="center">重复次数</th>
+                  <th style="width:9%" class="center">操作</th>
                 </tr>
               </thead>
               <tbody id="dedupBody">
-                <tr class="empty-row"><td colspan="6">上传发票后将自动进行查重比对</td></tr>
+                <tr class="empty-row"><td colspan="7">上传发票后将自动进行查重比对</td></tr>
               </tbody>
             </table>
           </div>
@@ -208,6 +210,46 @@
     </section>
 
   </main>
+
+  <div class="modal-overlay" id="editModal" hidden>
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">编辑发票信息</span>
+        <button class="modal-close" id="editCloseBtn">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="form-item">发票号码
+            <input type="text" id="editNumber" placeholder="如 2441200000001234567">
+          </label>
+          <label class="form-item">发票代码（旧版发票）
+            <input type="text" id="editCode" placeholder="可留空">
+          </label>
+          <label class="form-item">开票日期
+            <input type="text" id="editDate" placeholder="如 2026年08月15日">
+          </label>
+          <label class="form-item">金额(元)
+            <input type="text" id="editAmount" placeholder="如 1280.00">
+          </label>
+          <label class="form-item form-full">销售方名称
+            <input type="text" id="editSeller" placeholder="公司全称">
+          </label>
+          <label class="form-item form-full">购买方名称
+            <input type="text" id="editBuyer" placeholder="公司全称">
+          </label>
+          <label class="form-item form-full">税额(元)
+            <input type="text" id="editTax" placeholder="如 76.80">
+          </label>
+        </div>
+        <div class="modal-file">来源文件：<span id="editFileName"></span></div>
+        <div class="modal-hint">识别不到或识别错的字段可以直接修改，保存后会自动更新台账和查重结果。</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="editCancelBtn">取消</button>
+        <button class="btn btn-primary" id="editSaveBtn">保存修改</button>
+      </div>
+    </div>
+  </div>
 
   <div class="toast" id="toast"></div>
   <div class="loading-overlay" id="loadingOverlay">
