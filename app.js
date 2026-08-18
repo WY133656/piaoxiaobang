@@ -517,6 +517,48 @@ function saveLedgerNow() {
   });
 }
 
+/* ---- 工作现场自动保存：银行流水 / 业务单据 / 对账结果 / 报表快照 ----
+ * 打开页面时 initFromStore 会自动恢复，刷新/误关浏览器不丢数据 */
+function saveBankNow() {
+  return Store.saveDataset('bank', state.bankRows).catch(err => {
+    console.error('保存银行流水失败:', err);
+  });
+}
+
+function saveBizNow() {
+  return Store.saveDataset('biz', state.bizDocs).catch(err => {
+    console.error('保存业务单据失败:', err);
+  });
+}
+
+function saveReconNow() {
+  var p = (state.reconResult && state.reconResult.rows && state.reconResult.rows.length)
+    ? Store.saveDataset('recon', [{
+        mode: state.reconMode,
+        result: state.reconResult,
+        issues: state.reconIssues,
+        board: state.collectionBoard,
+        savedAt: new Date().toISOString()
+      }])
+    : Store.clearDataset('recon');
+  return p.catch(err => { console.error('保存对账结果失败:', err); });
+}
+
+function saveReportsNow() {
+  var hasAny = state.currentReport || state.currentTemplate || state.currentAnalysis || state.finAnalysis || state.finStatements.length;
+  var p = hasAny
+    ? Store.saveDataset('reports', [{
+        currentReport: state.currentReport,
+        currentTemplate: state.currentTemplate,
+        currentAnalysis: state.currentAnalysis,
+        finStatements: state.finStatements,
+        finAnalysis: state.finAnalysis,
+        savedAt: new Date().toISOString()
+      }])
+    : Store.clearDataset('reports');
+  return p.catch(err => { console.error('保存报表快照失败:', err); });
+}
+
 // PDF 页面渲染为 JPEG base64（供 OCR 使用，最多前 N 页）
 async function renderPdfToImages(file, maxPages) {
   const arrayBuffer = await file.arrayBuffer();
@@ -1000,6 +1042,8 @@ function handleBankFiles(files) {
       }
       state.bankRows = rows;
       state.reconResult = null;
+      saveBankNow();   // 自动保存流水
+      saveReconNow();  // 旧对账结果已失效，同步清除
       hideLoading();
       renderRecon();
       showToast('已读取 ' + rows.length + ' 笔银行流水，点击「开始对账」', 'success');
@@ -1103,6 +1147,8 @@ function handleBizFiles(files) {
     hideLoading();
     state.bizDocs = all;
     state.reconResult = null;
+    saveBizNow();      // 自动保存业务单据
+    saveReconNow();    // 旧对账结果已失效，同步清除
     renderRecon();
     showToast('已读取业务单据 ' + all.length + ' 条，点击「开始对账」走阶梯式匹配', all.length ? 'success' : 'error');
   };
@@ -1135,6 +1181,8 @@ function clearBizDocs() {
   state.reconIssues = [];
   state.collectionBoard = [];
   state.reconView = 'detail';
+  saveBizNow();
+  saveReconNow();
   renderRecon();
   showToast('已清空业务单据，对账退化为与发票台账匹配', 'success');
 }
@@ -1163,6 +1211,7 @@ function startRecon() {
     state.reconView = 'detail';
     hideLoading();
     renderRecon();
+    saveReconNow();  // 自动保存对账结果
     const s = state.reconResult.stats;
     showToast('对账完成：匹配 ' + s.matched + ' / ' + s.total + ' 笔' + (s.unmatched > 0 ? '，未匹配 ' + s.unmatched + ' 笔' : ''),
       s.unmatched > 0 ? 'error' : 'success');
@@ -1386,6 +1435,8 @@ function clearRecon() {
   state.collectionBoard = [];
   state.reconView = 'detail';
   $('reconAiResult').hidden = true;
+  saveBankNow();
+  saveReconNow();
   renderRecon();
   showToast('已清空对账数据', 'success');
 }
@@ -1479,6 +1530,7 @@ function buildWeekly() {
   const rep = Report.buildWeeklyReport(state.ledger, { isMyCompanyFn: isMyCompany });
   state.currentReport = rep;
   renderReportView(rep);
+  saveReportsNow();
 }
 
 function buildMonthly() {
@@ -1486,6 +1538,7 @@ function buildMonthly() {
   const rep = Report.buildMonthlyReport(state.ledger, { isMyCompanyFn: isMyCompany });
   state.currentReport = rep;
   renderReportView(rep);
+  saveReportsNow();
 }
 
 function renderReportView(rep) {
@@ -1629,6 +1682,7 @@ function renderAnalysisV2(md) {
   html += '<div class="report-card"><div class="md-body">' + renderMarkdownText(md) + '</div></div>';
   $('reportView').innerHTML = html;
   $('reportHint').textContent = '已生成 AI 4 段式分析报告。可「导出 Word」或「打印/PDF」';
+  saveReportsNow();
 }
 
 function copyBrief() {
@@ -1767,6 +1821,7 @@ async function handleFinFiles(files) {
   }
   hideLoading();
   renderFinFileList();
+  saveReportsNow();  // 自动保存已解析的财务报表
   if (ok > 0) {
     showToast('已解析 ' + ok + ' 个财务报表' + (fail > 0 ? '，' + fail + ' 个失败' : '') + '，可点击「生成财务报表分析」', fail > 0 ? 'error' : 'success');
   }
@@ -1846,6 +1901,7 @@ function clearFinFiles() {
   state.finStatements = [];
   state.finAnalysis = null;
   state.currentAnalysis = null;
+  saveReportsNow();
   renderFinFileList();
   $('reportView').innerHTML = '<div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>';
   $('reportHint').textContent = '数据来自本地发票台账；周报/月报/出表模板均在页面内查看，可复制简报或导出 Excel / Word / PDF（不发邮件）。';
@@ -1858,6 +1914,7 @@ function analyzeFin() {
   const res = FinStat.buildFinAnalysis(state.finStatements);
   state.finAnalysis = res;
   renderFinAnalysis(res);
+  saveReportsNow();  // 自动保存财务分析结果
   showToast('财务报表分析已生成（' + res.sourceCount + ' 张报表）', 'success');
 }
 
@@ -1980,6 +2037,7 @@ function renderFinAiContent(md) {
   } else {
     wrap.innerHTML += '<div class="report-card"><div class="report-card-title">AI 文字分析报告</div><div class="md-body">' + renderMarkdownText(md) + '</div></div>';
   }
+  saveReportsNow();  // 自动保存 AI 财务分析报告
 }
 
 function bindFinFileDel() {
@@ -1990,6 +2048,7 @@ function bindFinFileDel() {
         state.finStatements.splice(idx, 1);
         state.finAnalysis = null;
         state.currentAnalysis = null;
+        saveReportsNow();
         renderFinFileList();
         if (!state.finStatements.length) {
           $('reportView').innerHTML = '<div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>';
@@ -2147,6 +2206,7 @@ function renderTemplateView(rep) {
 
   $('reportView').innerHTML = html;
   $('reportHint').textContent = '已生成：' + rep.title + '。可「导出 Excel / Word」或「打印/PDF」，或点击「AI 分析报告」生成 4 段式文字分析';
+  saveReportsNow();
 }
 
 // 费用排行视图内切换 按分类 / 按供应商
@@ -2277,6 +2337,7 @@ function checkMondayReport() {
     if (rep.snapshot.count === 0) return;
     state.currentReport = rep;
     renderReportView(rep);
+    saveReportsNow();
     setTimeout(() => {
       showToast('今天是周一，已自动生成上周周报：收入 ¥' + rep.snapshot.inAmount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) +
         '，支出 ¥' + rep.snapshot.outAmount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) + '，见「报表中心」', 'success');
@@ -2625,8 +2686,9 @@ function saveSettingsModal() {
   showToast('设置已保存', 'success');
 }
 
-// 启动时从 IndexedDB 恢复台账
+// 启动时从 IndexedDB 恢复工作现场（台账 + 对账区 + 报表中心）
 async function initFromStore() {
+  // 1) 发票台账
   try {
     const rows = await Store.loadLedger();
     if (rows && rows.length > 0) {
@@ -2637,6 +2699,57 @@ async function initFromStore() {
     }
   } catch (err) {
     console.error('读取本地台账失败:', err);
+  }
+
+  // 2) 对账区：银行流水 / 业务单据 / 对账结果
+  const restored = [];
+  try {
+    const bank = await Store.loadDataset('bank');
+    if (bank && bank.length) { state.bankRows = bank; restored.push('银行流水 ' + bank.length + ' 笔'); }
+  } catch (err) { console.error('读取银行流水失败:', err); }
+  try {
+    const biz = await Store.loadDataset('biz');
+    if (biz && biz.length) { state.bizDocs = biz; restored.push('业务单据 ' + biz.length + ' 张'); }
+  } catch (err) { console.error('读取业务单据失败:', err); }
+  try {
+    const recon = await Store.loadDataset('recon');
+    const snap = recon && recon[0];
+    if (snap && snap.result && snap.result.rows && snap.result.rows.length) {
+      state.reconResult = snap.result;
+      state.reconMode = snap.mode || 'ledger';
+      state.reconIssues = snap.issues || [];
+      state.collectionBoard = snap.board || [];
+      restored.push('对账结果');
+    }
+  } catch (err) { console.error('读取对账结果失败:', err); }
+  if (restored.length) renderRecon();
+
+  // 3) 报表中心：财务报表 / 综合分析 / AI 分析 / 出表模板 / 周报月报
+  let reportRestored = false;
+  try {
+    const reps = await Store.loadDataset('reports');
+    const snap = reps && reps[0];
+    if (snap) {
+      if (snap.finStatements && snap.finStatements.length) {
+        state.finStatements = snap.finStatements;
+        renderFinFileList();
+        reportRestored = true;
+      }
+      state.finAnalysis = snap.finAnalysis || null;
+      state.currentAnalysis = snap.currentAnalysis || null;
+      state.currentTemplate = snap.currentTemplate || null;
+      state.currentReport = snap.currentReport || null;
+      // 渲染优先级：财务分析 > AI 分析 > 出表模板 > 周报/月报
+      if (state.finAnalysis) { renderFinAnalysis(state.finAnalysis); reportRestored = true; }
+      else if (state.currentAnalysis) { renderAnalysisV2(state.currentAnalysis); reportRestored = true; }
+      else if (state.currentTemplate) { renderTemplateView(state.currentTemplate); reportRestored = true; }
+      else if (state.currentReport) { renderReportView(state.currentReport); reportRestored = true; }
+    }
+  } catch (err) { console.error('读取报表快照失败:', err); }
+
+  if (reportRestored) restored.push('报表中心结果');
+  if (restored.length) {
+    showToast('已恢复上次工作现场：' + restored.join('、'), 'success');
   }
 }
 
