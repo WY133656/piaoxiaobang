@@ -1689,3 +1689,269 @@ body {
   border-left: 3px solid var(--color-info);
   border-radius: var(--radius-md);
 }
+
+/* ============ 财务报表上传与一键分析（v4.1） ============ */
+
+.fin-panel {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.fin-panel-head {
+  margin-bottom: 10px;
+}
+
+.fin-panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.fin-panel-sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+  margin-top: 3px;
+}
+
+.fin-upload-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.upload-box-fin {
+  flex: 0 0 300px;
+  padding: 14px;
+  min-height: 118px;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.fin-file-list {
+  flex: 1 1 260px;
+  min-width: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  padding: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fin-file-empty {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  padding: 20px 8px;
+  text-align: center;
+}
+
+.fin-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.fin-file-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.fin-file-badge.income { background: #2563eb; }
+.fin-file-badge.balance { background: #7c3aed; }
+.fin-file-badge.cashflow { background: #059669; }
+.fin-file-badge.unknown { background: var(--text-tertiary); }
+
+.fin-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.fin-file-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.fin-file-del {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.fin-file-del:hover {
+  color: var(--color-danger);
+  background: var(--bg-danger);
+}
+
+.fin-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.fin-actions-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ---- 财务分析结果 ---- */
+
+.fin-indicator-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.fin-indicator {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+}
+
+.fin-indicator .fi-name {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  display: block;
+}
+
+.fin-indicator .fi-value {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: block;
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fin-indicator .fi-value.up { color: #16a34a; }
+.fin-indicator .fi-value.down { color: var(--color-danger); }
+
+.fin-indicator .fi-prev {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  display: block;
+  margin-top: 2px;
+}
+
+.fin-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 14px 0 2px;
+}
+
+.fin-group-period {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+/* 勾稽校验 */
+.fin-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.fin-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  font-size: 12.5px;
+}
+
+.fin-check .fc-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.fin-check .fc-title {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.fin-check .fc-detail {
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-top: 2px;
+}
+
+.fin-check.ok .fc-icon { color: #16a34a; }
+.fin-check.bad .fc-icon { color: var(--color-danger); }
+
+/* 报表明细表 */
+.fin-detail-table {
+  margin: 8px 0 4px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.fin-detail-table .row-total td {
+  font-weight: 700;
+  background: var(--bg-secondary);
+}
+
+.fin-alert-item {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  margin: 5px 0;
+  line-height: 1.6;
+}
+
+.fin-alert-item.warn {
+  background: var(--issue-orange-bg, #fff7ed);
+  color: #c2410c;
+}
+
+.fin-alert-item.bad {
+  background: var(--issue-red-bg, #fef2f2);
+  color: #b91c1c;
+}
+
+.fin-alert-item.ok {
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.fin-alert-item.info {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}

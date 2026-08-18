@@ -17,6 +17,7 @@
   <script src="ai.js"></script>
   <script src="recon.js"></script>
   <script src="report.js"></script>
+  <script src="finstat.js"></script>
   <script src="parser.js"></script>
 </head>
 <body>
@@ -346,6 +347,36 @@
             <button class="btn btn-ghost" id="reportPdfBtn">打印/PDF</button>
           </div>
           <div class="report-hint" id="reportHint">数据来自本地发票台账；周报/月报/出表模板均在页面内查看，可复制简报或导出 Excel / Word / PDF（不发邮件）。</div>
+        </div>
+        <div class="fin-panel" id="finPanel">
+          <div class="fin-panel-head">
+            <div class="fin-panel-title">财务报表上传 · 一键财务分析</div>
+            <div class="fin-panel-sub">上传利润表 / 资产负债表 / 现金流量表（可多份、多月），自动识别类型并取数，生成财务指标、三表勾稽校验与 AI 分析报告</div>
+          </div>
+          <div class="fin-upload-row">
+            <div class="upload-box upload-box-alt upload-box-fin" id="finUploadBox">
+              <div class="upload-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="8" y1="13" x2="16" y2="13"/>
+                  <line x1="8" y1="17" x2="16" y2="17"/>
+                </svg>
+              </div>
+              <div class="upload-title">上传财务报表文件</div>
+              <div class="upload-hint">.xlsx .xls .csv .docx .pdf .ofd 图片，自动识别利润表 / 资产负债表 / 现金流量表</div>
+              <button class="btn btn-primary" id="finSelectBtn">选择文件</button>
+              <button class="btn btn-ghost btn-sm" id="finClearBtn">清空</button>
+              <input type="file" id="finFileInput" accept=".xlsx,.xls,.csv,.docx,.pdf,.ofd,.png,.jpg,.jpeg,.webp" multiple hidden>
+            </div>
+            <div class="fin-file-list" id="finFileList">
+              <div class="fin-file-empty">尚未上传财务报表，可一次选择多份文件（如本月利润表 + 资产负债表 + 现金流量表）</div>
+            </div>
+          </div>
+          <div class="fin-actions">
+            <button class="btn btn-primary" id="finAnalyzeBtn" disabled>生成财务报表分析</button>
+            <span class="fin-actions-hint">勾稽校验需同时具备资产负债表 + 利润表（或现金流量表）</span>
+          </div>
         </div>
         <div class="report-view" id="reportView">
           <div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>

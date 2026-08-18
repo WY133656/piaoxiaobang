@@ -28,7 +28,9 @@ const state = {
   collectionBoard: [],// 回款看板
   currentReport: null, // 当前报表（周报/月报）
   currentTemplate: null, // 当前出表模板（income / expenseRank / cashflow）
-  currentAnalysis: null // 当前 4 段式 AI 分析文本
+  currentAnalysis: null, // 当前 4 段式 AI 分析文本
+  finStatements: [],  // 财务报表（finstat.js 解析结果，支持多份）
+  finAnalysis: null   // 财务报表综合分析结果
 };
 
 const DEMO_DATA = [
@@ -1630,9 +1632,10 @@ function renderAnalysisV2(md) {
 }
 
 function copyBrief() {
-  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) { showToast('请先生成周报/月报或出表模板', 'error'); return; }
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis && !state.finAnalysis) { showToast('请先生成周报/月报、出表模板或财务报表分析', 'error'); return; }
   let text;
   if (state.currentAnalysis) text = state.currentAnalysis;
+  else if (state.finAnalysis) text = finAnalysisBriefText(state.finAnalysis);
   else if (state.currentTemplate) text = templateBriefText(state.currentTemplate);
   else text = Report.buildBriefText(state.currentReport);
   const done = () => showToast('简报已复制，可粘贴到微信 / 钉钉 / 文档分享', 'success');
@@ -1643,6 +1646,25 @@ function copyBrief() {
   } else {
     fallbackCopy(text); done();
   }
+}
+
+// 财务报表分析 → 纯文本简报
+function finAnalysisBriefText(res) {
+  const lines = [res.title, '数据来源：' + res.sourceCount + ' 张财务报表'];
+  (res.indicators || []).forEach(g => {
+    lines.push('【' + g.title + (g.period ? ' · ' + g.period : '') + '】');
+    g.items.forEach(it => {
+      let val = '';
+      if (it.fmt === 'pct') val = (it.value === null ? 0 : it.value).toFixed(1) + '%';
+      else if (it.fmt === 'ratio') val = (it.value === null ? 0 : it.value).toFixed(2);
+      else val = '¥' + (it.value === null || it.value === undefined ? 0 : it.value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      lines.push('- ' + it.name + '：' + val + (it.prev !== undefined && it.prev !== null ? '（上期 ¥' + it.prev.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '）' : ''));
+    });
+  });
+  lines.push('【勾稽校验】');
+  (res.checks || []).forEach(c => lines.push('- ' + (c.ok ? '✓ ' : '✗ ') + c.title + '：' + c.detail));
+  (res.alerts || []).filter(a => a.level === 'warn' || a.level === 'bad').forEach(a => lines.push('- ⚠ ' + a.text));
+  return lines.join('\n');
 }
 
 // 出表模板 → 纯文本简报
@@ -1678,6 +1700,8 @@ function fallbackCopy(text) {
 }
 
 function exportReportExcel() {
+  // 财务报表分析走专用导出
+  if (state.finAnalysis) { exportFinAnalysisExcel(); return; }
   // 出表模板走专用导出；周报/月报走原导出
   if (state.currentTemplate) { exportTemplateExcel(); return; }
   if (!state.currentReport) { showToast('请先生成周报或月报（或出表模板）', 'error'); return; }
@@ -1710,6 +1734,310 @@ function exportReportExcel() {
   XLSX.utils.book_append_sheet(wb, ws, '业务报表');
   XLSX.writeFile(wb, '业务报表_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   showToast('已导出业务报表 Excel', 'success');
+}
+
+/* ============ 财务报表上传与一键分析（v4.1） ============ */
+
+// 统一解析入口：Excel/CSV → 工作表；Word → document.xml 表格；PDF/OFD/图片 → 文本行 → 科目行
+async function handleFinFiles(files) {
+  const list = Array.from(files);
+  if (!list.length) return;
+  showLoading('正在解析财务报表 (' + list.length + ' 个文件)...');
+  let ok = 0, fail = 0;
+  for (let i = 0; i < list.length; i++) {
+    const file = list[i];
+    $('loadingText').textContent = '正在解析 ' + (i + 1) + '/' + list.length + ': ' + file.name;
+    try {
+      const st = await parseFinFile(file);
+      if (st && st.items && st.items.length) {
+        st.fileName = file.name;
+        st.fileSize = file.size;
+        state.finStatements.push(st);
+        ok++;
+      } else {
+        // 解析出空报表也提示
+        showToast('「' + file.name + '」未识别到科目数据，请确认是财务报表（利润表/资产负债表/现金流量表）', 'error');
+        fail++;
+      }
+    } catch (err) {
+      console.error('财务报表解析失败:', file.name, err);
+      showToast('解析失败: ' + file.name + '（' + err.message + '）', 'error');
+      fail++;
+    }
+  }
+  hideLoading();
+  renderFinFileList();
+  if (ok > 0) {
+    showToast('已解析 ' + ok + ' 个财务报表' + (fail > 0 ? '，' + fail + ' 个失败' : '') + '，可点击「生成财务报表分析」', fail > 0 ? 'error' : 'success');
+  }
+}
+
+// 单文件解析 → finstat.parseStatement 输出
+async function parseFinFile(file) {
+  const name = file.name || '';
+  let rows = null;
+
+  if (/\.(xlsx|xls|csv)$/i.test(name)) {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  } else if (/\.docx$/i.test(name)) {
+    const buf = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buf);
+    const xml = await zip.file('word/document.xml').async('string');
+    const doc = Parser.parseDocxXml(xml);
+    rows = (doc.tables || []).filter(t => t && t.length)[0] || null;
+    if (!rows) {
+      // Word 无表格时用段落文本行兜底
+      const lines = (doc.paragraphs || []).filter(p => /\d/.test(p));
+      rows = FinStat.textLinesToRows(lines);
+      if (!rows.length) return null;
+    }
+  } else {
+    // PDF / OFD / 图片：先提取文本
+    const extracted = await extractInvoiceText(file);
+    let text = (extracted && extracted.text) || '';
+    // 扫描件兜底：文本为空且配置了 OCR → 渲染页面转图片识别
+    if (!text && AI.isConfigured('ocr')) {
+      const images = await renderPdfToImages(file, 3);
+      const parts = [];
+      for (let j = 0; j < images.length; j++) {
+        const t = await AI.ocrText(images[j]);
+        if (t) parts.push(t);
+      }
+      text = parts.join('\n');
+    }
+    if (!text.trim()) return null;
+    const textRows = Parser.textToRows(text);
+    const finRows = FinStat.textLinesToRows(textRows);
+    if (!finRows.length) return null;
+    rows = finRows;
+  }
+
+  const st = FinStat.parseStatement(rows || []);
+  if (!st.items.length) return null;
+  return st;
+}
+
+function renderFinFileList() {
+  const box = $('finFileList');
+  const list = state.finStatements;
+  $('finAnalyzeBtn').disabled = list.length === 0;
+  if (!list.length) {
+    box.innerHTML = '<div class="fin-file-empty">尚未上传财务报表，可一次选择多份文件（如本月利润表 + 资产负债表 + 现金流量表）</div>';
+    return;
+  }
+  box.innerHTML = list.map((st, i) => {
+    const badge = st.type === 'income' ? 'income' : st.type === 'balance' ? 'balance' : st.type === 'cashflow' ? 'cashflow' : 'unknown';
+    const label = st.label || '未识别';
+    const period = st.period ? ' · ' + st.period : '';
+    return '<div class="fin-file-item">' +
+      '<span class="fin-file-badge ' + badge + '">' + label + '</span>' +
+      '<span class="fin-file-name" title="' + esc(st.fileName || '') + '">' + esc(st.fileName || '') + '</span>' +
+      '<span class="fin-file-meta">' + st.items.length + ' 科目' + period + '</span>' +
+      '<button class="fin-file-del" data-idx="' + i + '" title="移除">×</button>' +
+      '</div>';
+  }).join('');
+}
+
+function clearFinFiles() {
+  state.finStatements = [];
+  state.finAnalysis = null;
+  state.currentAnalysis = null;
+  renderFinFileList();
+  $('reportView').innerHTML = '<div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>';
+  $('reportHint').textContent = '数据来自本地发票台账；周报/月报/出表模板均在页面内查看，可复制简报或导出 Excel / Word / PDF（不发邮件）。';
+  showToast('已清空财务报表', 'success');
+}
+
+// 生成财务报表综合分析（指标 + 勾稽校验 + 预警）
+function analyzeFin() {
+  if (!state.finStatements.length) { showToast('请先上传财务报表', 'error'); return; }
+  const res = FinStat.buildFinAnalysis(state.finStatements);
+  state.finAnalysis = res;
+  renderFinAnalysis(res);
+  showToast('财务报表分析已生成（' + res.sourceCount + ' 张报表）', 'success');
+}
+
+function renderFinAnalysis(res) {
+  const fmt = (n) => '¥' + (n === null || n === undefined ? 0 : n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtPct = (n) => (n === null || n === undefined ? 0 : n).toFixed(1) + '%';
+  const fmtRatio = (n) => (n === null || n === undefined ? 0 : n).toFixed(2);
+
+  let html = '';
+  // 头部
+  html += '<div class="report-card report-head"><div class="report-title">' + esc(res.title) + '</div>' +
+    '<div class="report-sub">基于 ' + res.sourceCount + ' 张已上传财务报表 · 自动取数生成，数据仅来自你提供的报表文件</div></div>';
+
+  // 预警区
+  if (res.alerts.length) {
+    html += '<div class="report-card"><div class="report-card-title">自动预警</div>' +
+      res.alerts.map(a => '<div class="fin-alert-item ' + a.level + '">' + esc(a.text) + '</div>').join('') +
+      '</div>';
+  }
+
+  // 指标分组
+  if (res.indicators.length) {
+    html += res.indicators.map(g =>
+      '<div class="report-card"><div class="report-card-title">' + esc(g.title) +
+      (g.period ? '<span class="fin-group-period">' + esc(g.period) + '</span>' : '') + '</div>' +
+      '<div class="fin-indicator-grid">' + g.items.map(it => {
+        let valHtml = '';
+        if (it.fmt === 'pct') valHtml = '<span class="fi-value' + (it.value < 0 ? ' down' : '') + '">' + fmtPct(it.value) + '</span>';
+        else if (it.fmt === 'ratio') valHtml = '<span class="fi-value' + (it.value < 1 ? ' down' : '') + '">' + fmtRatio(it.value) + '</span>';
+        else valHtml = '<span class="fi-value' + ((it.value || 0) < 0 ? ' down' : '') + '">' + fmt(it.value) + '</span>';
+        return '<div class="fin-indicator"><span class="fi-name">' + esc(it.name) + '</span>' + valHtml +
+          (it.prev !== undefined && it.prev !== null ? '<span class="fi-prev">上期 ' + fmt(it.prev) + '</span>' : '') +
+          (it.sub ? '<span class="fi-prev">' + esc(it.sub) + '</span>' : '') + '</div>';
+      }).join('') + '</div></div>'
+    ).join('');
+  }
+
+  // 勾稽校验
+  html += '<div class="report-card"><div class="report-card-title">三表勾稽校验</div><div class="fin-check-list">' +
+    res.checks.map(c => '<div class="fin-check ' + (c.ok ? 'ok' : 'bad') + '">' +
+      '<span class="fc-icon">' + (c.ok ? '✓' : '✗') + '</span>' +
+      '<div><div class="fc-title">' + esc(c.title) + '</div><div class="fc-detail">' + esc(c.detail) + '</div></div>' +
+      '</div>').join('') + '</div></div>';
+
+  // 报表明细（仅本页展示，导出走 Excel）
+  const detailCards = [];
+  [res.income, res.balance, res.cashflow].forEach(st => {
+    if (!st || !st.items || !st.items.length) return;
+    detailCards.push('<div class="report-card"><div class="report-card-title">' + esc(st.label + (st.period ? ' · ' + st.period : '')) + '（' + st.items.length + ' 科目）</div>' +
+      '<div class="fin-detail-table"><table class="invoice-table tmpl-table"><thead><tr>' +
+      '<th style="width:50%">项目</th><th class="num">本期/期末</th><th class="num">上期/年初</th></tr></thead><tbody>' +
+      st.items.map(it => '<tr' + (it.isTotal ? ' class="row-total"' : '') + '>' +
+        '<td>' + esc(it.name) + '</td>' +
+        '<td class="num">' + (it.current === null ? '-' : fmt(it.current)) + '</td>' +
+        '<td class="num">' + (it.previous === null ? '-' : fmt(it.previous)) + '</td></tr>').join('') +
+      '</tbody></table></div></div>');
+  });
+  html += detailCards.join('');
+
+  // AI 报告容器
+  html += '<div id="finAiResult"><div class="report-card"><div class="report-card-title">AI 文字分析报告</div>' +
+    '<div class="report-none">点击「AI 分析报告」按钮生成 4 段式财务分析（约 500 字）</div></div></div>';
+
+  $('reportView').innerHTML = html;
+  $('reportHint').textContent = '已生成：' + res.title + '。可「AI 分析报告」生成文字分析，或「导出 Excel / Word / PDF」';
+  // 明细表删除按钮事件（委托）
+  bindFinFileDel();
+  // AI 按钮：动态注入
+  const aiBtn = document.createElement('button');
+  aiBtn.className = 'btn btn-primary';
+  aiBtn.textContent = 'AI 分析报告';
+  aiBtn.id = 'finAiBtn';
+  aiBtn.style.marginTop = '10px';
+  const wrap = $('finAiResult');
+  if (wrap) wrap.insertBefore(aiBtn, wrap.firstChild);
+  if (aiBtn) aiBtn.addEventListener('click', aiAnalyzeFin);
+}
+
+// 4 段式 AI 财务报表分析（未配置大模型时规则模板降级）
+async function aiAnalyzeFin() {
+  const res = state.finAnalysis;
+  if (!res) { showToast('请先生成财务报表分析', 'error'); return; }
+  const wrap = $('finAiResult');
+  if (!AI.isConfigured('llm')) {
+    const content = FinStat.templateFinAnalysis(res);
+    state.currentAnalysis = content;
+    renderFinAiContent(content);
+    showToast('未配置大模型，已用内置模板生成分析（配置后效果更佳）', 'error');
+    return;
+  }
+  showLoading('AI 正在撰写财务报表分析报告...');
+  try {
+    const p = FinStat.buildFinAnalysisPrompt(res);
+    const content = await AI.llmChat([
+      { role: 'system', content: p.system },
+      { role: 'user', content: p.user }
+    ], { temperature: 0.4, maxTokens: 1500 });
+    state.currentAnalysis = content;
+    hideLoading();
+    renderFinAiContent(content);
+    showToast('AI 财务报表分析已生成', 'success');
+  } catch (err) {
+    hideLoading();
+    console.error(err);
+    showToast('AI 分析失败: ' + err.message, 'error');
+  }
+}
+
+function renderFinAiContent(md) {
+  const wrap = $('finAiResult');
+  if (!wrap) return;
+  const card = wrap.querySelector('.report-card');
+  if (card) {
+    card.innerHTML = '<div class="report-card-title">AI 文字分析报告</div><div class="md-body">' + renderMarkdownText(md) + '</div>';
+  } else {
+    wrap.innerHTML += '<div class="report-card"><div class="report-card-title">AI 文字分析报告</div><div class="md-body">' + renderMarkdownText(md) + '</div></div>';
+  }
+}
+
+function bindFinFileDel() {
+  document.querySelectorAll('.fin-file-del').forEach(btn => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.idx);
+      if (!isNaN(idx) && idx >= 0) {
+        state.finStatements.splice(idx, 1);
+        state.finAnalysis = null;
+        state.currentAnalysis = null;
+        renderFinFileList();
+        if (!state.finStatements.length) {
+          $('reportView').innerHTML = '<div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>';
+          $('reportHint').textContent = '数据来自本地发票台账；周报/月报/出表模板均在页面内查看，可复制简报或导出 Excel / Word / PDF（不发邮件）。';
+        } else {
+          showToast('已移除文件，请重新「生成财务报表分析」', 'success');
+        }
+      }
+    };
+  });
+}
+
+// 财务报表分析 → Excel（指标 + 校验 + 三表明细）
+function exportFinAnalysisExcel() {
+  const res = state.finAnalysis;
+  if (!res) { showToast('请先生成财务报表分析', 'error'); return; }
+  const rows = [
+    ['票小帮 · ' + res.title],
+    ['生成时间', new Date().toLocaleString('zh-CN')],
+    ['数据来源', res.sourceCount + ' 张财务报表'],
+    [],
+  ];
+  res.indicators.forEach(g => {
+    rows.push(['【' + g.title + (g.period ? ' · ' + g.period : '') + '】', '', '']);
+    rows.push(['指标', '数值', '上期/说明']);
+    g.items.forEach(it => {
+      let val = '';
+      if (it.fmt === 'pct') val = (it.value === null ? 0 : it.value).toFixed(1) + '%';
+      else if (it.fmt === 'ratio') val = (it.value === null ? 0 : it.value).toFixed(2);
+      else val = (it.value === null || it.value === undefined ? 0 : it.value);
+      rows.push([it.name, val, it.prev !== undefined && it.prev !== null ? it.prev : (it.sub || '')]);
+    });
+    rows.push([]);
+  });
+  rows.push(['【勾稽校验】', '', '']);
+  res.checks.forEach(c => rows.push([c.title, c.ok ? '通过 ✓' : '异常 ✗', c.detail]));
+  rows.push([]);
+  [res.income, res.balance, res.cashflow].forEach(st => {
+    if (!st || !st.items.length) return;
+    rows.push(['【' + st.label + (st.period ? ' · ' + st.period : '') + '】', '', '']);
+    rows.push(['项目', '本期/期末', '上期/年初']);
+    st.items.forEach(it => rows.push([it.name, it.current === null ? '' : it.current, it.previous === null ? '' : it.previous]));
+    rows.push([]);
+  });
+  if (res.alerts.length) {
+    rows.push(['【自动预警】', '', '']);
+    res.alerts.forEach(a => rows.push(['[' + a.level + ']', a.text, '']));
+  }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{ wch: 22 }, { wch: 18 }, { wch: 46 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '财务报表分析');
+  XLSX.writeFile(wb, '财务报表分析_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+  showToast('已导出财务报表分析 Excel', 'success');
 }
 
 /* ============ 出表模板（损益对比 / 费用排行 / 现金流简表） ============ */
@@ -1875,7 +2203,20 @@ const REPORT_PRINT_CSS = [
   '.md-body{line-height:1.8}.md-h1{font-size:15px;font-weight:700;margin:10px 0 6px}.md-h2{font-size:14px;font-weight:700;margin:10px 0 6px}',
   '.md-h3{font-size:13px;font-weight:600;margin:8px 0 4px}.md-p{margin:6px 0}.md-list{margin:6px 0;padding-left:20px}',
   '.view-tabs{display:none}',
-  '.tag,.issue-chip,.board-chip{display:none}'
+  '.tag,.issue-chip,.board-chip{display:none}',
+  '.fin-indicator-grid{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}',
+  '.fin-indicator{flex:1 1 150px;border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;background:#f9fafb}',
+  '.fi-name{display:block;color:#888;font-size:11px}.fi-value{display:block;font-size:16px;font-weight:700}.fi-value.down{color:#dc2626}',
+  '.fi-prev{display:block;color:#888;font-size:11px;margin-top:2px}',
+  '.fin-group-period{color:#888;font-size:11px;font-weight:400;margin-left:6px}',
+  '.fin-check-list{margin:8px 0}.fin-check{border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;margin:6px 0;background:#f9fafb;font-size:12.5px}',
+  '.fc-icon{font-weight:700}.fin-check.ok .fc-icon{color:#16a34a}.fin-check.bad .fc-icon{color:#dc2626}',
+  '.fin-check .fc-title{font-weight:700}.fin-check .fc-detail{color:#555;line-height:1.6}',
+  '.fin-alert-item{border-radius:6px;padding:6px 10px;margin:5px 0;font-size:12.5px}',
+  '.fin-alert-item.warn{background:#fff7ed;color:#c2410c}.fin-alert-item.bad{background:#fef2f2;color:#b91c1c}',
+  '.fin-alert-item.ok{background:#f0fdf4;color:#15803d}.fin-alert-item.info{background:#f3f4f6;color:#4b5563}',
+  '.row-total td{font-weight:700;background:#f9fafb}',
+  '#finAiBtn{display:none}'
 ].join('');
 
 function reportViewToHtml(title) {
@@ -1888,13 +2229,14 @@ function reportViewToHtml(title) {
 
 function currentDocTitle() {
   if (state.currentAnalysis) return 'AI 财务分析报告';
+  if (state.finAnalysis) return state.finAnalysis.title;
   if (state.currentTemplate) return state.currentTemplate.title;
   if (state.currentReport) return state.currentReport.title;
   return '票小帮报表';
 }
 
 function exportReportWord() {
-  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) {
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis && !state.finAnalysis) {
     showToast('请先生成报表或分析报告', 'error');
     return;
   }
@@ -1905,7 +2247,7 @@ function exportReportWord() {
 }
 
 function exportReportPdf() {
-  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) {
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis && !state.finAnalysis) {
     showToast('请先生成报表或分析报告', 'error');
     return;
   }
@@ -2359,6 +2701,11 @@ function init() {
   $('exportReportBtn').addEventListener('click', exportReportExcel);
   $('reportWordBtn').addEventListener('click', exportReportWord);
   $('reportPdfBtn').addEventListener('click', exportReportPdf);
+
+  // 财务报表上传与一键分析（v4.1）
+  setupUpload('finUploadBox', 'finSelectBtn', 'finFileInput', handleFinFiles);
+  $('finClearBtn').addEventListener('click', clearFinFiles);
+  $('finAnalyzeBtn').addEventListener('click', analyzeFin);
 
   $('doMergeBtn').addEventListener('click', doMerge);
   setupLayoutButtons();
