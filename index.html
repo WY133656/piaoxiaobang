@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>票小帮 - PDF发票管理工具</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧾</text></svg>">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo">票小帮</div>
+      <nav class="tabs">
+        <button class="tab active" data-page="ledger">台账管理</button>
+        <button class="tab" data-page="dedup">发票查重</button>
+        <button class="tab" data-page="merge">合并打印</button>
+      </nav>
+    </div>
+    <div class="topbar-right">
+      <span class="stats-label">已处理</span>
+      <span class="stats-count" id="totalCount">0</span>
+      <span class="stats-label">张</span>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <section id="page-ledger" class="page active">
+      <div class="page-grid">
+        <aside class="upload-panel">
+          <div class="upload-box" id="ledgerUploadBox">
+            <div class="upload-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <div class="upload-title">拖拽上传 PDF 发票</div>
+            <div class="upload-hint">或点击选择文件（可多选）</div>
+            <button class="btn btn-primary" id="ledgerSelectBtn">选择文件</button>
+            <input type="file" id="ledgerFileInput" accept=".pdf" multiple hidden>
+          </div>
+          <div class="upload-tips">
+            <p>支持批量上传 PDF 格式发票</p>
+            <p>文件仅在浏览器本地处理，不会上传服务器</p>
+          </div>
+          <button class="btn btn-ghost btn-block" id="loadDemoBtn">加载演示数据</button>
+        </aside>
+
+        <div class="result-panel">
+          <div class="result-header">
+            <div>
+              <span class="result-title">发票列表</span>
+              <span class="result-meta" id="ledgerMeta">暂无数据</span>
+            </div>
+            <div class="result-actions">
+              <button class="btn btn-ghost" id="clearLedgerBtn" disabled>清空</button>
+              <button class="btn btn-primary" id="exportExcelBtn" disabled>导出 Excel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="invoice-table" id="ledgerTable">
+              <thead>
+                <tr>
+                  <th style="width:30%">发票号码</th>
+                  <th style="width:14%">开票日期</th>
+                  <th style="width:24%">销售方名称</th>
+                  <th style="width:12%" class="num">金额(元)</th>
+                  <th style="width:12%" class="num">税额(元)</th>
+                  <th style="width:8%" class="center">状态</th>
+                </tr>
+              </thead>
+              <tbody id="ledgerBody">
+                <tr class="empty-row"><td colspan="6">上传 PDF 发票后，识别结果将显示在这里</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-dedup" class="page">
+      <div class="page-grid">
+        <aside class="upload-panel">
+          <div class="upload-box" id="dedupUploadBox">
+            <div class="upload-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <div class="upload-title">拖拽上传 PDF 发票</div>
+            <div class="upload-hint">系统将自动比对查重</div>
+            <button class="btn btn-primary" id="dedupSelectBtn">选择文件</button>
+            <input type="file" id="dedupFileInput" accept=".pdf" multiple hidden>
+          </div>
+          <div class="upload-tips">
+            <p>按发票号码自动比对，标注重复项</p>
+            <p>防止同一张发票重复报销</p>
+          </div>
+          <button class="btn btn-ghost btn-block" id="dedupFromLedgerBtn">从台账导入</button>
+        </aside>
+
+        <div class="result-panel">
+          <div class="result-header">
+            <div>
+              <span class="result-title">查重结果</span>
+              <span class="result-meta" id="dedupMeta">暂无数据</span>
+            </div>
+            <div class="result-actions">
+              <button class="btn btn-ghost" id="clearDedupBtn" disabled>清空</button>
+              <button class="btn btn-primary" id="exportDedupBtn" disabled>导出 Excel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="invoice-table" id="dedupTable">
+              <thead>
+                <tr>
+                  <th style="width:30%">发票号码</th>
+                  <th style="width:14%">开票日期</th>
+                  <th style="width:24%">销售方名称</th>
+                  <th style="width:12%" class="num">金额(元)</th>
+                  <th style="width:10%" class="center">状态</th>
+                  <th style="width:10%" class="center">重复次数</th>
+                </tr>
+              </thead>
+              <tbody id="dedupBody">
+                <tr class="empty-row"><td colspan="6">上传发票后将自动进行查重比对</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-merge" class="page">
+      <div class="merge-layout">
+        <aside class="upload-panel merge-upload">
+          <div class="upload-box" id="mergeUploadBox">
+            <div class="upload-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <div class="upload-title">拖拽上传 PDF 发票</div>
+            <div class="upload-hint">选择排版方式后合并到 A4</div>
+            <button class="btn btn-primary" id="mergeSelectBtn">选择文件</button>
+            <input type="file" id="mergeFileInput" accept=".pdf" multiple hidden>
+          </div>
+          <div class="merge-file-list" id="mergeFileList">
+            <div class="merge-file-empty">未选择文件</div>
+          </div>
+        </aside>
+
+        <div class="result-panel">
+          <div class="result-header">
+            <span class="result-title">打印设置</span>
+          </div>
+          <div class="merge-settings">
+            <div class="setting-group">
+              <label class="setting-label">排版方式</label>
+              <div class="layout-options" id="layoutOptions">
+                <button class="layout-opt active" data-layout="1">每页 1 张</button>
+                <button class="layout-opt" data-layout="2">每页 2 张</button>
+                <button class="layout-opt" data-layout="4">每页 4 张</button>
+                <button class="layout-opt" data-layout="6">每页 6 张</button>
+                <button class="layout-opt" data-layout="8">每页 8 张</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">打印方向</label>
+              <div class="layout-options">
+                <button class="layout-opt active" data-orient="portrait">纵向</button>
+                <button class="layout-opt" data-orient="landscape">横向</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">页面边距 (mm)</label>
+              <div class="margin-inputs">
+                <div class="margin-item"><span>上</span><input type="number" id="marginTop" value="10" min="0" max="50"></div>
+                <div class="margin-item"><span>下</span><input type="number" id="marginBottom" value="10" min="0" max="50"></div>
+                <div class="margin-item"><span>左</span><input type="number" id="marginLeft" value="10" min="0" max="50"></div>
+                <div class="margin-item"><span>右</span><input type="number" id="marginRight" value="10" min="0" max="50"></div>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label">发票边框</label>
+              <div class="layout-options">
+                <button class="layout-opt active" data-border="none">不显示</button>
+                <button class="layout-opt" data-border="show">显示</button>
+              </div>
+            </div>
+          </div>
+          <div class="merge-actions">
+            <div class="merge-preview-info" id="mergePreviewInfo">请先上传发票文件</div>
+            <button class="btn btn-primary" id="doMergeBtn" disabled>合并并下载 PDF</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="toast" id="toast"></div>
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <div class="loading-text" id="loadingText">正在处理...</div>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <span>票小帮 MVP · PDF发票管理工具 · 所有文件均在浏览器本地处理，不上传服务器</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
