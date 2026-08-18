@@ -165,6 +165,42 @@ function extractNameByLabel(clean, labelPatterns, stopPatterns) {
   return '';
 }
 
+// 在"购买方信息/销售方信息"块内定位"名称"标签后的公司名称
+// （块位置自适应，无"块+名称"连续匹配要求，兼容标签与值分行的布局）
+function nameInBlock(clean, blockLabel) {
+  const idx = clean.indexOf(blockLabel);
+  if (idx < 0) return '';
+  const seg = clean.slice(idx + blockLabel.length, idx + blockLabel.length + 260);
+  const m = seg.match(/名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=统一社会信用代码|纳税人识别号|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/);
+  if (!m) return '';
+  const name = m[1].replace(/[：:，,。.、\s]/g, '');
+  return (name.length >= 2 && name.length <= 40) ? name : '';
+}
+
+// 收集全部"名称：xxx"条目（旧版无块标题的平铺格式）
+function collectNameEntries(clean) {
+  const out = [];
+  const re = /名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=纳税人识别号|统一社会信用代码|身份证号|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/g;
+  let m;
+  while ((m = re.exec(clean)) !== null) {
+    const n = m[1].replace(/[：:，,。.、\s]/g, '');
+    if (n.length >= 2 && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+// 公司名特征过滤（剔除商品明细"项目名称：激光打印机"等非公司条目）
+function looksLikeCompany(n) {
+  return /(有限|公司|集团|厂|店|餐馆|饭店|商行|经营部|事务所|工作室|部|所|行|院|中心)$/.test(n);
+}
+
+// 是否自家公司（通途数科）——购买方通常是本公司，用它来区分销售方/购买方
+function isMyCompany(n) {
+  const MY = (LC && LC.MY_COMPANY) || '';
+  if (!MY || !n) return false;
+  return n.indexOf('通途') >= 0 || n === MY || n.indexOf(MY) >= 0;
+}
+
 function parseInvoiceText(rawText, fileName) {
   const invoice = {
     number: '',
@@ -195,33 +231,27 @@ function parseInvoiceText(rawText, fileName) {
                     clean.match(/(\d{4})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
   if (dateMatch) invoice.date = normalizeDate(dateMatch[1], dateMatch[2], dateMatch[3]);
 
-  // ---------- 名称 ----------
-  const stopPatterns = [
-    /销售方信息/, /购买方信息/, /销售方名称/, /购买方名称/, /销售方[：:]/, /购买方[：:]/,
-    /销售方|购买方/, /信息名称/, /纳税人识别号/, /统一社会信用代码/, /开户行及账号/, /开户行/,
-    /地址[，,]?电话/, /地址/, /电话/, /合计金额/, /合计税额/, /价税合计/, /合计/, /金额/, /税额/,
-    /备注/, /收款人/, /开票人/
-  ];
+  // ---------- 名称（销售方 / 购买方） ----------
+  // 1) 优先按"购买方信息/销售方信息"块提取（数电票/新版电子票，块位置自适应，不会对调）
+  invoice.buyer = nameInBlock(clean, '购买方信息') || nameInBlock(clean, '购买方');
+  invoice.seller = nameInBlock(clean, '销售方信息') || nameInBlock(clean, '销售方');
 
-  invoice.seller = extractNameByLabel(clean, [
-    /销售方信息名称[：:]*?/, /销售方名称[：:]*?/, /销方名称[：:]*?/, /销售方[：:]*?名称[：:]*?/, /销售方[：:]*?/
-  ], stopPatterns);
-
-  invoice.buyer = extractNameByLabel(clean, [
-    /购买方信息名称[：:]*?/, /购买方名称[：:]*?/, /购方名称[：:]*?/, /购买方[：:]*?名称[：:]*?/, /购买方[：:]*?/
-  ], stopPatterns);
-
-  // 兼容"名称：xxx"无前缀的旧版格式（按出现顺序区分购买方/销售方）
+  // 2) 兜底：无块标题的旧版格式（"名称：xxx"平铺）
+  //    用"自家公司=购买方"识别，避免按出现顺序假设导致销售方/购买方对调
   if (!invoice.seller || !invoice.buyer) {
-    const nameMatches = [];
-    const nameRe = /名称[：:]*?([\u4e00-\u9fa5（）()A-Za-z0-9·]{2,40}?)(?=纳税人识别号|统一社会信用代码|开户行|地址|电话|金额|税额|价税合计|合计|备注|收款人|开票人|$)/g;
-    let m;
-    while ((m = nameRe.exec(clean)) !== null) nameMatches.push(m[1]);
-    if (nameMatches.length >= 2) {
-      if (!invoice.buyer) invoice.buyer = nameMatches[0];
-      if (!invoice.seller) invoice.seller = nameMatches[1];
-    } else if (nameMatches.length === 1) {
-      if (!invoice.seller && !invoice.buyer) invoice.seller = nameMatches[0];
+    const names = collectNameEntries(clean).filter(looksLikeCompany);
+    const myIdx = names.findIndex(isMyCompany);
+    if (myIdx >= 0) {
+      // 自家公司 → 购买方；其余第一条 → 销售方
+      if (!invoice.buyer) invoice.buyer = names[myIdx];
+      const others = names.filter((n, i) => i !== myIdx);
+      // 公司条目里没有其他名称时，从全量条目里再找（兼容个人代开"名称:张三"）
+      invoice.seller = invoice.seller || others[0] ||
+        collectNameEntries(clean).find(n => !isMyCompany(n)) || '';
+    } else {
+      // 没识别到自家公司（如代开/转开），退回首条=购买方、次条=销售方
+      if (!invoice.buyer) invoice.buyer = names[0] || '';
+      if (!invoice.seller) invoice.seller = names[1] || '';
     }
   }
 
