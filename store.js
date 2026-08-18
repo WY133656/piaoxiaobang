@@ -1,15 +1,18 @@
 /* ============================================================
- * 票小帮 · 本地持久化模块（IndexedDB）
- * 功能：台账数据浏览器本地持久化，刷新/关闭页面不丢失
- * 说明：File 对象无法结构化克隆，保存时自动剔除 file 字段，
- *       仅保留可序列化的台账字段。
+ * 票小帮 · 本地持久化模块（IndexedDB 多数据集）
+ * 功能：台账 / 银行流水 / 业务单据 / 对账结果 / 报表快照 浏览器本地持久化
+ * 说明：
+ *   - DB_VERSION=2，创建 5 个 store：ledger/bank/biz/recon/reports
+ *   - 通用 API：saveDataset / loadDataset / clearDataset
+ *   - 旧 API（saveLedger/loadLedger/clearLedger）保留兼容
+ *   - File 对象无法结构化克隆，保存时自动剔除 file 字段
  * ============================================================ */
 (function (global) {
   'use strict';
 
   var DB_NAME = 'piaoxiaobang';
-  var DB_VERSION = 1;
-  var STORE = 'ledger';
+  var DB_VERSION = 2;
+  var STORES = ['ledger', 'bank', 'biz', 'recon', 'reports'];
 
   var db = null;
 
@@ -23,23 +26,26 @@
       var req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = function (e) {
         var d = e.target.result;
-        if (!d.objectStoreNames.contains(STORE)) {
-          d.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
-        }
+        STORES.forEach(function (name) {
+          if (!d.objectStoreNames.contains(name)) {
+            d.createObjectStore(name, { keyPath: 'id', autoIncrement: true });
+          }
+        });
       };
       req.onsuccess = function () { db = req.result; resolve(db); };
       req.onerror = function () { reject(req.error); };
     });
   }
 
-  // 全量覆盖保存（数据量小，简单可靠）
-  function saveLedger(ledger) {
+  // 通用：全量覆盖保存一个数据集
+  function saveDataset(name, data) {
+    if (STORES.indexOf(name) < 0) return Promise.reject(new Error('未知数据集: ' + name));
     return open().then(function (d) {
       return new Promise(function (resolve, reject) {
-        var tx = d.transaction(STORE, 'readwrite');
-        var s = tx.objectStore(STORE);
+        var tx = d.transaction(name, 'readwrite');
+        var s = tx.objectStore(name);
         s.clear();
-        (ledger || []).forEach(function (item) {
+        (data || []).forEach(function (item) {
           var record = Object.assign({}, item);
           delete record.file; // File 对象不可序列化
           s.add(record);
@@ -50,30 +56,43 @@
     });
   }
 
-  function loadLedger() {
+  // 通用：读取一个数据集全部记录
+  function loadDataset(name) {
+    if (STORES.indexOf(name) < 0) return Promise.reject(new Error('未知数据集: ' + name));
     return open().then(function (d) {
       return new Promise(function (resolve, reject) {
-        var tx = d.transaction(STORE, 'readonly');
-        var req = tx.objectStore(STORE).getAll();
+        var tx = d.transaction(name, 'readonly');
+        var req = tx.objectStore(name).getAll();
         req.onsuccess = function () { resolve(req.result || []); };
         req.onerror = function () { reject(req.error); };
       });
     });
   }
 
-  function clearLedger() {
+  // 通用：清空一个数据集
+  function clearDataset(name) {
+    if (STORES.indexOf(name) < 0) return Promise.reject(new Error('未知数据集: ' + name));
     return open().then(function (d) {
       return new Promise(function (resolve, reject) {
-        var tx = d.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).clear();
+        var tx = d.transaction(name, 'readwrite');
+        tx.objectStore(name).clear();
         tx.oncomplete = function () { resolve(); };
         tx.onerror = function () { reject(tx.error); };
       });
     });
   }
 
+  // ---- 兼容旧 API ----
+  function saveLedger(ledger) { return saveDataset('ledger', ledger); }
+  function loadLedger() { return loadDataset('ledger'); }
+  function clearLedger() { return clearDataset('ledger'); }
+
   var Store = {
     open: open,
+    STORES: STORES,
+    saveDataset: saveDataset,
+    loadDataset: loadDataset,
+    clearDataset: clearDataset,
     saveLedger: saveLedger,
     loadLedger: loadLedger,
     clearLedger: clearLedger

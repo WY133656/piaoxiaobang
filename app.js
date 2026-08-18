@@ -21,7 +21,14 @@ const state = {
   mergeBorder: 'none',
   bankRows: [],       // 银行流水（自动对账）
   reconResult: null,  // 对账结果
-  currentReport: null // 当前报表（周报/月报）
+  bizDocs: [],        // 业务单据（应收/应付，阶梯式匹配）
+  reconMode: 'ledger',// 'ledger' 与发票台账匹配 | 'biz' 与业务单据阶梯匹配
+  reconView: 'detail',// detail | issues | board
+  reconIssues: [],    // 待办异议表（红蓝橙）
+  collectionBoard: [],// 回款看板
+  currentReport: null, // 当前报表（周报/月报）
+  currentTemplate: null, // 当前出表模板（income / expenseRank / cashflow）
+  currentAnalysis: null // 当前 4 段式 AI 分析文本
 };
 
 const DEMO_DATA = [
@@ -1004,18 +1011,159 @@ function handleBankFiles(files) {
   reader.readAsArrayBuffer(file);
 }
 
+/* ---- 业务单据（应收/应付模板）---- */
+
+// 固定模板列：业务单号 / 类型(应收|应付) / 客户供应商 / 金额 / 预计到账日期 / 备注
+// 容错识别：按表头关键词定位列，列顺序无关
+function parseBizDocs(sheetRows) {
+  const rows = sheetRows || [];
+  let headerIdx = -1, cols = null;
+
+  // 两阶段识别表头：先精确匹配「单号 + 金额」，再按关键词兜底
+  const keywordCols = {
+    docNo: ['业务单号', '单号', '编号'],
+    type: ['业务类型', '类型', '方向'],
+    party: ['客户', '供应商', '对方', '单位名称', '名称'],
+    amount: ['金额', '应收金额', '应付金额'],
+    dueDate: ['预计到账', '到账日期', '日期', '期限'],
+    note: ['备注', '说明']
+  };
+  const matchCol = (header) => {
+    const h = String(header || '').trim();
+    for (const key of Object.keys(keywordCols)) {
+      if (keywordCols[key].some(kw => h.indexOf(kw) >= 0)) return key;
+    }
+    return '';
+  };
+
+  for (let i = 0; i < Math.min(rows.length, 10); i++) {
+    const line = rows[i];
+    if (!Array.isArray(line)) continue;
+    const text = line.map(String).join('|');
+    if (!/单号|编号/.test(text)) continue;
+    const colMap = {};
+    line.forEach((cell, ci) => {
+      const key = matchCol(cell);
+      if (key && colMap[key] === undefined) colMap[key] = ci;
+    });
+    if (colMap.docNo !== undefined && colMap.amount !== undefined && colMap.party !== undefined) {
+      headerIdx = i; cols = colMap; break;
+    }
+  }
+  if (cols === null) return { docs: [], errors: ['未识别到业务单据模板表头（需包含 业务单号/类型/客户供应商/金额/日期）'] };
+
+  // 日期归一：支持 2026-08-20 / 2026/8/20 / 2026年8月20日 / Excel 序列号
+  const normDate = (v) => {
+    if (v === undefined || v === null || v === '') return '';
+    if (typeof v === 'number' && v > 20000 && v < 60000) {
+      // Excel 日期序列号 → Date（1900 系统，含闰年 bug 修正）
+      const d = new Date(Math.round((v - 25569) * 86400000));
+      return isNaN(d.getTime()) ? '' : fmtDateObj(d);
+    }
+    const s = String(v).trim();
+    let m = s.match(/(\d{4})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})/);
+    if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
+    m = s.match(/(\d{4})(\d{2})(\d{2})/);
+    if (m) return m[1] + '-' + m[2] + '-' + m[3];
+    const t = new Date(s);
+    return isNaN(t.getTime()) ? '' : fmtDateObj(t);
+  };
+
+  const docs = [];
+  const errors = [];
+  rows.slice(headerIdx + 1).forEach((line) => {
+    if (!Array.isArray(line)) return;
+    const cell = (key) => line[cols[key]];
+    const docNo = String(cell('docNo') || '').trim();
+    const amount = parseFloat(String(cell('amount') || '').replace(/,/g, ''));
+    if (!docNo || isNaN(amount) || amount <= 0) return;
+
+    const typeRaw = String(cell('type') || '');
+    const type = /收|销|借/.test(typeRaw) ? '应收' : (/付|购/.test(typeRaw) ? '应付' : '应收');
+    docs.push({
+      docNo, type,
+      party: String(cell('party') || '').trim(),
+      amount: Math.round(amount * 100) / 100,
+      dueDate: normDate(cell('dueDate')),
+      note: String(cell('note') || '').trim()
+    });
+  });
+
+  if (!docs.length) errors.push('模板内未解析到有效单据行（单号 + 金额必填）');
+  return { docs, errors };
+}
+
+function handleBizFiles(files) {
+  showLoading('正在读取业务单据...');
+  const all = [];
+  let pending = files.length;
+  const finish = () => {
+    hideLoading();
+    state.bizDocs = all;
+    state.reconResult = null;
+    renderRecon();
+    showToast('已读取业务单据 ' + all.length + ' 条，点击「开始对账」走阶梯式匹配', all.length ? 'success' : 'error');
+  };
+  Array.from(files).forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const sheetRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+        const parsed = parseBizDocs(sheetRows);
+        if (parsed.errors.length) {
+          parsed.errors.forEach(msg => showToast(msg, 'error'));
+        }
+        parsed.docs.forEach(d => all.push(d));
+      } catch (err) {
+        console.error(err);
+        showToast('读取业务单据失败: ' + err.message, 'error');
+      }
+      if (--pending === 0) finish();
+    };
+    reader.onerror = () => { if (--pending === 0) finish(); };
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function clearBizDocs() {
+  state.bizDocs = [];
+  state.reconResult = null;
+  state.reconIssues = [];
+  state.collectionBoard = [];
+  state.reconView = 'detail';
+  renderRecon();
+  showToast('已清空业务单据，对账退化为与发票台账匹配', 'success');
+}
+
 function startRecon() {
   if (!state.bankRows.length) return;
-  showLoading('正在与台账自动匹配...');
+  showLoading(state.bizDocs.length ? '正在执行阶梯式匹配（L1 强匹配 / L2 容差 / L3 模糊）...' : '正在与台账自动匹配...');
   setTimeout(() => {
-    const res = Recon.matchLedger(state.ledger, state.bankRows, {
-      isMyCompanyFn: (n) => isMyCompany(n)
-    });
-    state.reconResult = res;
+    if (state.bizDocs.length) {
+      // 业务单据模式：三要素阶梯式匹配 + 红蓝橙异议 + 回款看板
+      const res = Recon.matchBusiness(state.bankRows, state.bizDocs, { tol: 5, dateWindow: 3 });
+      state.reconResult = res;
+      state.reconMode = 'biz';
+      state.reconIssues = Recon.buildReconIssues(res);
+      state.collectionBoard = Recon.buildCollectionBoard(res);
+    } else {
+      // 未导入单据 → 退化为与发票台账匹配
+      const res = Recon.matchLedger(state.ledger, state.bankRows, {
+        isMyCompanyFn: (n) => isMyCompany(n)
+      });
+      state.reconResult = res;
+      state.reconMode = 'ledger';
+      state.reconIssues = [];
+      state.collectionBoard = [];
+    }
+    state.reconView = 'detail';
     hideLoading();
     renderRecon();
-    showToast('对账完成：匹配 ' + res.stats.matched + ' / ' + res.stats.total + ' 笔',
-      res.stats.unmatched > 0 ? 'error' : 'success');
+    const s = state.reconResult.stats;
+    showToast('对账完成：匹配 ' + s.matched + ' / ' + s.total + ' 笔' + (s.unmatched > 0 ? '，未匹配 ' + s.unmatched + ' 笔' : ''),
+      s.unmatched > 0 ? 'error' : 'success');
   }, 30);
 }
 
@@ -1023,6 +1171,7 @@ function renderRecon() {
   const body = $('reconBody');
   const rows = state.bankRows;
   const res = state.reconResult;
+  const isBiz = state.reconMode === 'biz';
 
   if (!rows.length) {
     body.innerHTML = '<tr class="empty-row"><td colspan="9">上传银行流水并点击「开始对账」</td></tr>';
@@ -1033,48 +1182,99 @@ function renderRecon() {
     $('reconAiBtn').disabled = true;
     $('reconStats').innerHTML = '';
     $('reconAiResult').hidden = true;
+    $('reconViewTabs').hidden = true;
+    $('reconViewIssues').hidden = true;
+    $('reconViewBoard').hidden = true;
+    $('reconViewDetail').hidden = false;
     return;
   }
+
+  // 视图切换 tabs：仅业务单据模式显示（异议表/看板依赖单据数据）
+  const tabsEl = $('reconViewTabs');
+  if (isBiz && res) {
+    tabsEl.hidden = false;
+    tabsEl.querySelectorAll('.view-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.view === state.reconView);
+    });
+  } else {
+    tabsEl.hidden = true;
+    state.reconView = 'detail';
+  }
+  $('reconViewDetail').hidden = state.reconView !== 'detail';
+  $('reconViewIssues').hidden = state.reconView !== 'issues';
+  $('reconViewBoard').hidden = state.reconView !== 'board';
 
   // 统计卡
   let statsHtml = '<div class="stat-card"><span class="stat-label">流水笔数</span><span class="stat-value">' + rows.length + '</span></div>';
   if (res) {
     const s = res.stats;
-    statsHtml +=
-      '<div class="stat-card"><span class="stat-label">已匹配</span><span class="stat-value ok">' + s.matched + '</span></div>' +
-      '<div class="stat-card"><span class="stat-label">未匹配</span><span class="stat-value bad">' + s.unmatched + '</span></div>' +
-      '<div class="stat-card"><span class="stat-label">收款合计</span><span class="stat-value">' + formatAmount(s.inAmount.toFixed(2)) + '</span></div>' +
-      '<div class="stat-card"><span class="stat-label">付款合计</span><span class="stat-value">' + formatAmount(s.outAmount.toFixed(2)) + '</span></div>';
+    if (isBiz) {
+      statsHtml +=
+        '<div class="stat-card"><span class="stat-label">L1 强匹配</span><span class="stat-value ok">' + s.l1 + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">L2 容差</span><span class="stat-value ok">' + s.l2 + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">待确认</span><span class="stat-value' + (s.pending ? ' bad' : '') + '">' + s.pending + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">重复</span><span class="stat-value' + (s.duplicate ? ' bad' : '') + '">' + s.duplicate + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">未匹配</span><span class="stat-value' + (s.unmatched ? ' bad' : '') + '">' + s.unmatched + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">单据结清</span><span class="stat-value">' + s.settledDocs + '/' + s.docs + '</span></div>';
+    } else {
+      statsHtml +=
+        '<div class="stat-card"><span class="stat-label">已匹配</span><span class="stat-value ok">' + s.matched + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">未匹配</span><span class="stat-value bad">' + s.unmatched + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">收款合计</span><span class="stat-value">' + formatAmount(s.inAmount.toFixed(2)) + '</span></div>' +
+        '<div class="stat-card"><span class="stat-label">付款合计</span><span class="stat-value">' + formatAmount(s.outAmount.toFixed(2)) + '</span></div>';
+    }
   } else {
-    statsHtml += '<div class="stat-card stat-hint"><span class="stat-label">提示</span><span class="stat-value" style="font-size:13px">点击「开始对账」匹配台账</span></div>';
+    statsHtml += '<div class="stat-card stat-hint"><span class="stat-label">提示</span><span class="stat-value" style="font-size:13px">点击「开始对账」' + (state.bizDocs.length ? '执行阶梯式匹配' : '匹配台账') + '</span></div>';
   }
   $('reconStats').innerHTML = statsHtml;
 
-  // 表格
+  // 明细表
   let html = '';
   rows.forEach((r, idx) => {
-    const done = res !== null && res.rows[idx];
-    const m = done ? res.rows[idx] : null;
-    const statusClass = m ? (m.status === 'matched' ? 'tag-success' : 'tag-danger') : 'tag-warning';
-    const statusText = m ? (m.status === 'matched' ? '已匹配' : '未匹配') : '待对账';
-    const reason = m ? (m.status === 'matched' ? (m.warning || '') : (m.reason || '')) : '';
-    const warnClass = m && m.status === 'matched' && m.warning ? ' cell-warn' : '';
+    const m = res ? res.rows[idx] : null;
+    let statusClass = 'tag-warning', statusText = '待对账';
+    if (m) {
+      if (isBiz) {
+        if (m.status === 'matched') { statusClass = m.tolerance ? 'tag-info' : 'tag-success'; statusText = m.tolerance ? '容差' : '已匹配'; }
+        else if (m.status === 'pending') { statusClass = 'tag-warning'; statusText = '待确认'; }
+        else if (m.status === 'duplicate') { statusClass = 'tag-danger'; statusText = '重复'; }
+        else { statusClass = 'tag-danger'; statusText = '未匹配'; }
+      } else {
+        statusClass = m.status === 'matched' ? 'tag-success' : 'tag-danger';
+        statusText = m.status === 'matched' ? '已匹配' : '未匹配';
+      }
+    }
+    const warnClass = m && ((m.status === 'matched' && m.warning) || (isBiz && m.status === 'unmatched')) ? ' cell-warn' : '';
+    let docNo = '-', docParty = '-', diffHtml = '-', reason = '-';
+    if (m) {
+      if (isBiz) {
+        docNo = m.docNo || '-';
+        docParty = m.docParty || '-';
+        diffHtml = (m.diff === undefined || m.diff === '') ? '-' : (m.diff > 0 ? '+' : '') + formatAmount(m.diff.toFixed(2));
+        reason = m.reason || '-';
+      } else {
+        docNo = m.invoiceNumber || '-';
+        docParty = m.invoiceParty || '-';
+        if (m.invoiceTotal !== undefined) diffHtml = formatAmount((m.invoiceTotal - r.amount).toFixed(2));
+        reason = m.status === 'matched' ? (m.warning || '-') : (m.reason || '-');
+      }
+    }
     html += '<tr class="' + (m && m.status === 'unmatched' ? 'duplicate' : '') + '">' +
       '<td>' + esc(r.date) + '</td>' +
       '<td class="cell-ellipsis" title="' + esc(r.counterparty) + '">' + esc(r.counterparty || '-') + '</td>' +
       '<td class="center">' + (r.direction === 'in' ? '收款' : '付款') + '</td>' +
       '<td class="num">' + formatAmount(r.amount.toFixed(2)) + '</td>' +
       '<td class="center"><span class="tag ' + statusClass + '">' + statusText + '</span></td>' +
-      '<td class="mono">' + esc(m ? (m.invoiceNumber || '') : '-') + '</td>' +
-      '<td class="cell-ellipsis" title="' + esc(m ? (m.invoiceParty || '') : '') + '">' + esc(m ? (m.invoiceParty || '-') : '-') + '</td>' +
-      '<td>' + esc(m ? (m.invoiceDate || '-') : '-') + '</td>' +
-      '<td class="' + warnClass + '">' + esc(reason || '-') + '</td>' +
+      '<td class="mono">' + esc(docNo) + '</td>' +
+      '<td class="cell-ellipsis" title="' + esc(docParty) + '">' + esc(docParty) + '</td>' +
+      '<td class="num">' + diffHtml + '</td>' +
+      '<td class="' + warnClass + '">' + esc(reason) + '</td>' +
       '</tr>';
   });
   body.innerHTML = html;
 
   const meta = res
-    ? '共 ' + rows.length + ' 笔，匹配 ' + res.stats.matched + ' 笔，未匹配 ' + res.stats.unmatched + ' 笔'
+    ? '共 ' + rows.length + ' 笔，匹配 ' + res.stats.matched + ' 笔，未匹配 ' + res.stats.unmatched + ' 笔' + (isBiz ? '（阶梯式：L1 ' + res.stats.l1 + ' / L2 ' + res.stats.l2 + ' / L3 ' + res.stats.l3 + '）' : '')
     : '共 ' + rows.length + ' 笔，待对账';
   $('reconMeta').textContent = meta;
   $('reconMeta').className = 'result-meta' + (res && res.stats.unmatched > 0 ? ' warn' : '');
@@ -1082,11 +1282,107 @@ function renderRecon() {
   $('clearReconBtn').disabled = false;
   $('exportReconBtn').disabled = !(res && res.rows.length > 0);
   $('reconAiBtn').disabled = !(res && res.rows.some(r => r.status === 'unmatched'));
+
+  // 异议表 + 回款看板（仅业务单据模式）
+  if (isBiz) renderReconIssues();
+  if (isBiz) renderCollectionBoard();
+}
+
+/* ---- 待办异议表（红蓝橙） ---- */
+
+const ISSUE_LABEL = { red: '长款', blue: '短款', orange: '重复' };
+
+function renderReconIssues() {
+  const issues = state.reconIssues || [];
+  const c = (n) => issues.filter(x => x.level === n).length;
+  $('issuesSummary').innerHTML =
+    '<div class="issue-chip type-red"><span class="dot"></span><span class="label">红·长款（银行有账业务无单）</span><span class="num">' + c('red') + '</span></div>' +
+    '<div class="issue-chip type-blue"><span class="dot"></span><span class="label">蓝·短款（业务有单银行无账）</span><span class="num">' + c('blue') + '</span></div>' +
+    '<div class="issue-chip type-orange"><span class="dot"></span><span class="label">橙·重复（单号被重复核销）</span><span class="num">' + c('orange') + '</span></div>';
+
+  if (!issues.length) {
+    $('issuesList').innerHTML = '<div class="report-none">没有待办异议，所有流水与单据均已对上 ✔</div>';
+    return;
+  }
+  $('issuesList').innerHTML = issues.map((it) => {
+    const side = it.level === 'blue'
+      ? formatAmount((it.remaining || it.amount).toFixed(2))
+      : formatAmount(it.amount.toFixed(2));
+    return '<div class="issues-item type-' + it.level + '">' +
+      '<span class="issue-badge type-' + it.level + '">' + (ISSUE_LABEL[it.level] || it.kind) + '</span>' +
+      '<div class="issue-body">' +
+        '<div class="issue-title">' + esc(it.title) + '</div>' +
+        '<div class="issue-desc">' + esc(it.text) + '</div>' +
+        '<div class="issue-suggestion">' + issueSuggestion(it) + '</div>' +
+      '</div>' +
+      '<div class="issue-side type-' + it.level + '">¥' + side + '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function issueSuggestion(it) {
+  if (it.level === 'red') return '建议：核对银行摘要，确认是否为未录单的业务/费用，补录业务单据或做账外说明';
+  if (it.level === 'blue') return '建议：跟进催收/付款，确认对方是否已支付但流水未下载完整，或调整预计到账日期';
+  return '建议：核对两笔流水是否同一笔款项，确认是否重复入账，必要时红冲或联系银行';
+}
+
+/* ---- 回款看板 ---- */
+
+const BOARD_STATUS = {
+  settled: { text: '已结清', cls: 'settled' },
+  partial: { text: '部分到账', cls: 'partial' },
+  overdue: { text: '已逾期', cls: 'overdue' },
+  pending: { text: '未到账', cls: 'pending' }
+};
+
+function renderCollectionBoard() {
+  const board = state.collectionBoard || [];
+  const sum = (f) => board.reduce((a, b) => a + (f(b) || 0), 0);
+  const amt = (n) => '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $('boardSummary').innerHTML =
+    '<div class="board-chip">应收合计 <strong>' + amt(sum(b => b.type === '应收' ? b.dueTotal : 0)) + '</strong></div>' +
+    '<div class="board-chip">应付合计 <strong>' + amt(sum(b => b.type === '应付' ? b.dueTotal : 0)) + '</strong></div>' +
+    '<div class="board-chip">已到账 <strong style="color:var(--color-success)">' + amt(sum(b => b.matchedAmount)) + '</strong></div>' +
+    '<div class="board-chip">未结清 <strong style="color:var(--color-warning)">' + amt(sum(b => b.remaining)) + '</strong></div>';
+
+  if (!board.length) {
+    $('boardGrid').innerHTML = '<div class="report-none">暂无单据，导入业务单据后生成回款看板</div>';
+    return;
+  }
+  $('boardGrid').innerHTML = board.map((g) => {
+    const st = BOARD_STATUS[g.status] || BOARD_STATUS.pending;
+    const openInfo = g.openDocs && g.openDocs.length
+      ? g.openDocs.map(d => '单号 ' + d.docNo + (d.dueDate ? '（' + d.dueDate + '）' : '')).join('、')
+      : '';
+    return '<div class="board-card">' +
+      '<div class="board-head">' +
+        '<span class="board-party" title="' + esc(g.party) + '">' + esc(g.party) + '</span>' +
+        '<span class="board-type">' + (g.type === '应收' ? '应收' : '应付') + '</span>' +
+      '</div>' +
+      '<div class="board-amounts">' +
+        '<div class="row"><span>应收/应付合计</span><span class="amt">' + amt(g.dueTotal) + '</span></div>' +
+        '<div class="row"><span>银行已到账</span><span class="amt paid">' + amt(g.matchedAmount) + '</span></div>' +
+        '<div class="row"><span>未到账</span><span class="amt left">' + amt(g.remaining) + '</span></div>' +
+      '</div>' +
+      '<div class="board-head"><span class="board-status ' + st.cls + '">' + st.text + (g.status === 'overdue' && g.overdueDays > 0 ? ' · 逾期 ' + g.overdueDays + ' 天' : '') + '</span>' +
+        '<span class="board-overdue">到账率 ' + g.ratio + '% · ' + g.docCount + ' 单</span></div>' +
+      (openInfo ? '<div class="board-foot">未结：' + esc(openInfo) + '</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function switchReconView(view) {
+  if (view !== 'detail' && view !== 'issues' && view !== 'board') return;
+  state.reconView = view;
+  renderRecon();
 }
 
 function clearRecon() {
   state.bankRows = [];
   state.reconResult = null;
+  state.reconIssues = [];
+  state.collectionBoard = [];
+  state.reconView = 'detail';
   $('reconAiResult').hidden = true;
   renderRecon();
   showToast('已清空对账数据', 'success');
@@ -1267,25 +1563,29 @@ function renderMarkdownText(md) {
 }
 
 // 用大模型生成文字版财务分析（未配置时模板降级）
+// v4.0：4 段固定结构（总体概览/费用异动预警/现金流健康度/业务提示），只基于提供数据
 async function aiAnalyzeReport() {
-  if (!state.currentReport) { showToast('请先生成周报或月报，再生成 AI 分析', 'error'); return; }
-  if (!AI.isConfigured('llm')) {
-    state.currentReport.analysis = Report.templateAnalysis(state.currentReport.snapshot);
-    renderReportView(state.currentReport);
-    showToast('未配置大模型，已用内置模板生成基础分析（配置后效果更佳）', 'error');
+  if (!state.ledger.length && !state.bankRows.length) {
+    showToast('台账为空，请先上传发票（或银行流水）再生成分析', 'error');
     return;
   }
-  showLoading('AI 正在生成财务分析报告...');
+  const data = collectAnalysisData();
+  if (!AI.isConfigured('llm')) {
+    const content = Report.templateAnalysisV2(data);
+    renderAnalysisV2(content);
+    showToast('未配置大模型，已用内置模板生成 4 段式分析（配置后效果更佳）', 'error');
+    return;
+  }
+  showLoading('AI 正在生成 4 段式财务分析报告...');
   try {
-    const p = Report.buildAnalysisPrompt(state.currentReport.snapshot);
+    const p = Report.buildAnalysisReportV2(data);
     const content = await AI.llmChat([
       { role: 'system', content: p.system },
       { role: 'user', content: p.user }
     ], { temperature: 0.4, maxTokens: 1500 });
-    state.currentReport.analysis = content;
-    renderReportView(state.currentReport);
+    renderAnalysisV2(content);
     hideLoading();
-    showToast('AI 分析报告已生成', 'success');
+    showToast('AI 4 段式财务分析报告已生成', 'success');
   } catch (err) {
     hideLoading();
     console.error(err);
@@ -1293,9 +1593,48 @@ async function aiAnalyzeReport() {
   }
 }
 
+// 汇总 4 段式分析所需数据：当前月快照 + 三张出表模板 + 环比预警
+function collectAnalysisData() {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth() + 1;
+  const fmtD = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const snap = Report.buildFinancialSnapshot(state.ledger, {
+    from: fmtD(new Date(y, m - 1, 1)), to: fmtD(new Date(y, m, 0)), isMyCompanyFn: isMyCompany
+  });
+  const prev = Report.buildFinancialSnapshot(state.ledger, {
+    from: fmtD(new Date(y, m - 2, 1)), to: fmtD(new Date(y, m - 1, 0)), isMyCompanyFn: isMyCompany
+  });
+  return {
+    period: y + '年' + m + '月',
+    snapshot: snap,
+    alerts: Report.compareSnapshots(snap, prev),
+    income: state.currentTemplate && state.currentTemplate.kind === 'income'
+      ? state.currentTemplate
+      : Report.buildIncomeStatement(state.ledger, { isMyCompanyFn: isMyCompany }),
+    expenseRank: state.currentTemplate && state.currentTemplate.kind === 'expenseRank'
+      ? state.currentTemplate
+      : Report.buildExpenseRanking(state.ledger, { isMyCompanyFn: isMyCompany }),
+    cashflow: state.bankRows.length ? Report.buildCashflow(state.bankRows) : null
+  };
+}
+
+// 4 段式分析结果渲染（Markdown → 卡片）
+function renderAnalysisV2(md) {
+  const title = 'AI 4 段式财务分析（' + new Date().toLocaleDateString('zh-CN') + '）';
+  state.currentAnalysis = md;
+  let html = '<div class="report-card report-head"><div class="report-title">' + title + '</div>' +
+    '<div class="report-sub">四段结构：总体概览 / 费用异动预警 / 现金流健康度 / 业务提示 · 仅基于已导入数据生成</div></div>';
+  html += '<div class="report-card"><div class="md-body">' + renderMarkdownText(md) + '</div></div>';
+  $('reportView').innerHTML = html;
+  $('reportHint').textContent = '已生成 AI 4 段式分析报告。可「导出 Word」或「打印/PDF」';
+}
+
 function copyBrief() {
-  if (!state.currentReport) { showToast('请先生成周报或月报', 'error'); return; }
-  const text = Report.buildBriefText(state.currentReport);
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) { showToast('请先生成周报/月报或出表模板', 'error'); return; }
+  let text;
+  if (state.currentAnalysis) text = state.currentAnalysis;
+  else if (state.currentTemplate) text = templateBriefText(state.currentTemplate);
+  else text = Report.buildBriefText(state.currentReport);
   const done = () => showToast('简报已复制，可粘贴到微信 / 钉钉 / 文档分享', 'success');
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(done).catch(() => {
@@ -1304,6 +1643,27 @@ function copyBrief() {
   } else {
     fallbackCopy(text); done();
   }
+}
+
+// 出表模板 → 纯文本简报
+function templateBriefText(rep) {
+  const lines = [rep.title];
+  if (rep.kind === 'income') {
+    lines.push('收入合计 ' + TMPL_FMT(rep.totals.income.current) + '（上月 ' + TMPL_FMT(rep.totals.income.lastMonth) + '）');
+    lines.push('支出合计 ' + TMPL_FMT(rep.totals.expense.current) + '（上月 ' + TMPL_FMT(rep.totals.expense.lastMonth) + '）');
+    lines.push('净额 ' + TMPL_FMT(rep.totals.net.current) + '（上月 ' + TMPL_FMT(rep.totals.net.lastMonth) + '）');
+    rep.rows.slice(0, 6).forEach(r => lines.push('- ' + r.name + '：' + TMPL_FMT(r.current) + '（环比 ' + TMPL_PCT(r.momPct) + '）'));
+  } else if (rep.kind === 'expenseRank') {
+    lines.push('支出合计 ' + TMPL_FMT(rep.total) + '，共 ' + rep.totalCount + ' 笔');
+    rep.rows.slice(0, 5).forEach(r => lines.push((r.rank <= 3 ? '★' : '') + r.rank + '. ' + r.name + '：' + TMPL_FMT(r.amount) + '（占 ' + r.pct + '%）'));
+  } else if (rep.kind === 'cashflow') {
+    lines.push('总流入 ' + TMPL_FMT(rep.totalIn) + ' / 总流出 ' + TMPL_FMT(rep.totalOut) + ' / 净额 ' + TMPL_FMT(rep.net));
+    ['经营', '投资', '筹资', '未分类'].forEach(k => {
+      const g = rep.sections[k] || { in: 0, out: 0, net: 0, count: 0 };
+      if (g.count > 0) lines.push('- ' + k + '：流入 ' + TMPL_FMT(g.in) + ' / 流出 ' + TMPL_FMT(g.out) + ' / 净额 ' + TMPL_FMT(g.net) + '（' + g.count + ' 笔）');
+    });
+  }
+  return lines.join('\n');
 }
 
 function fallbackCopy(text) {
@@ -1318,7 +1678,9 @@ function fallbackCopy(text) {
 }
 
 function exportReportExcel() {
-  if (!state.currentReport) { showToast('请先生成周报或月报', 'error'); return; }
+  // 出表模板走专用导出；周报/月报走原导出
+  if (state.currentTemplate) { exportTemplateExcel(); return; }
+  if (!state.currentReport) { showToast('请先生成周报或月报（或出表模板）', 'error'); return; }
   const s = state.currentReport.snapshot;
   const rows = [
     ['票小帮 · 业务报表'],
@@ -1348,6 +1710,213 @@ function exportReportExcel() {
   XLSX.utils.book_append_sheet(wb, ws, '业务报表');
   XLSX.writeFile(wb, '业务报表_' + new Date().toISOString().slice(0, 10) + '.xlsx');
   showToast('已导出业务报表 Excel', 'success');
+}
+
+/* ============ 出表模板（损益对比 / 费用排行 / 现金流简表） ============ */
+
+const TMPL_FMT = (n) => '¥' + (n || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const TMPL_PCT = (n) => (n === undefined || n === null || n === '' || isNaN(n)) ? '-' : (n > 0 ? '+' : '') + n + '%';
+const TMPL_PCT_CLS = (n) => (Math.abs(n || 0) >= 30 ? ' cell-warn' : '');
+
+function buildIncome() {
+  if (!state.ledger.length) { showToast('台账为空，请先上传发票', 'error'); return; }
+  const rep = Report.buildIncomeStatement(state.ledger, { isMyCompanyFn: isMyCompany });
+  state.currentTemplate = rep;
+  renderTemplateView(rep);
+}
+
+function buildExpenseRank(by) {
+  if (!state.ledger.length) { showToast('台账为空，请先上传发票', 'error'); return; }
+  const rep = Report.buildExpenseRanking(state.ledger, { isMyCompanyFn: isMyCompany, by: by || 'category' });
+  state.currentTemplate = rep;
+  renderTemplateView(rep);
+}
+
+function buildCashflow() {
+  if (!state.bankRows.length) { showToast('请先在对账页上传银行流水（现金流简表取数自银行流水）', 'error'); return; }
+  const rep = Report.buildCashflow(state.bankRows);
+  state.currentTemplate = rep;
+  renderTemplateView(rep);
+}
+
+// 模板视图渲染：损益对比表 / 费用排行 / 现金流简表
+function renderTemplateView(rep) {
+  state.currentTemplate = rep;
+  const nowTxt = new Date().toLocaleDateString('zh-CN');
+  let html = '<div class="report-card report-head"><div class="report-title">' + esc(rep.title) + '</div>' +
+    '<div class="report-sub">数据来源：本地发票台账 / 银行流水 · ' + nowTxt + ' 生成</div></div>';
+
+  if (rep.kind === 'income') {
+    const mkRows = (rows, kind) => rows.filter(r => r.kind === kind).map(r =>
+      '<tr><td>' + esc(r.name) + '</td>' +
+      '<td class="num">' + TMPL_FMT(r.current) + '</td>' +
+      '<td class="num">' + TMPL_FMT(r.lastMonth) + '</td>' +
+      '<td class="num">' + TMPL_FMT(r.lastYear) + '</td>' +
+      '<td class="num' + TMPL_PCT_CLS(r.momPct) + '">' + TMPL_PCT(r.momPct) + '</td>' +
+      '<td class="num' + TMPL_PCT_CLS(r.yoyPct) + '">' + TMPL_PCT(r.yoyPct) + '</td></tr>').join('');
+    const mkTotal = (label, t) =>
+      '<tr class="tmpl-total"><td>' + label + '</td>' +
+      '<td class="num">' + TMPL_FMT(t.current) + '</td>' +
+      '<td class="num">' + TMPL_FMT(t.lastMonth) + '</td>' +
+      '<td class="num">' + TMPL_FMT(t.lastYear) + '</td><td></td><td></td></tr>';
+    html += '<div class="report-card"><div class="report-card-title">收入</div>' +
+      '<table class="tmpl-table"><thead><tr><th>项目</th><th class="num">本月</th><th class="num">上月</th><th class="num">去年同期</th><th class="num">环比</th><th class="num">同比</th></tr></thead>' +
+      '<tbody>' + (mkRows(rep.rows, 'income') || '<tr><td colspan="6" class="report-none">本期无收入</td></tr>') + mkTotal('收入合计', rep.totals.income) + '</tbody></table></div>';
+    html += '<div class="report-card"><div class="report-card-title">支出</div>' +
+      '<table class="tmpl-table"><thead><tr><th>项目</th><th class="num">本月</th><th class="num">上月</th><th class="num">去年同期</th><th class="num">环比</th><th class="num">同比</th></tr></thead>' +
+      '<tbody>' + (mkRows(rep.rows, 'expense') || '<tr><td colspan="6" class="report-none">本期无支出</td></tr>') + mkTotal('支出合计', rep.totals.expense) + mkTotal('净额', rep.totals.net) + '</tbody></table></div>';
+    html += '<div class="report-hint-txt">说明：环比 = 本月 vs 上月，同比 = 本月 vs 去年同期；红色标注波动 ≥30% 的项目，建议核查原因。</div>';
+  }
+
+  if (rep.kind === 'expenseRank') {
+    const byLabel = rep.by === 'seller' ? '供应商' : '分类';
+    html += '<div class="view-tabs" style="margin:10px 0">' +
+      '<button class="view-tab' + (rep.by === 'category' ? ' active' : '') + '" onclick="toggleExpenseRank(\'category\')">按分类</button>' +
+      '<button class="view-tab' + (rep.by === 'seller' ? ' active' : '') + '" onclick="toggleExpenseRank(\'seller\')">按供应商</button></div>';
+    html += '<div class="report-card"><div class="report-card-title">' + rep.period + ' 费用排行（按' + byLabel + '）· 合计 ' + TMPL_FMT(rep.total) + ' / ' + rep.totalCount + ' 笔</div>' +
+      '<table class="tmpl-table"><thead><tr><th>排名</th><th>' + byLabel + '</th><th class="num">金额</th><th class="num">占比</th><th class="num">笔数</th></tr></thead><tbody>';
+    if (rep.rows.length) {
+      rep.rows.forEach(r => html +=
+        '<tr' + (r.rank <= 3 ? ' class="tmpl-top"' : '') + '>' +
+        '<td class="center">' + (r.rank <= 3 ? '<span class="rank-badge top' + r.rank + '">' + r.rank + '</span>' : r.rank) + '</td>' +
+        '<td>' + esc(r.name) + '</td>' +
+        '<td class="num">' + TMPL_FMT(r.amount) + '</td>' +
+        '<td class="num">' + r.pct + '%</td>' +
+        '<td class="num">' + r.count + '</td></tr>');
+    } else {
+      html += '<tr><td colspan="5" class="report-none">本期无支出数据</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    html += '<div class="report-hint-txt">说明：Top3 高亮显示；占比 = 该' + byLabel + '金额 / 本期支出总额。</div>';
+  }
+
+  if (rep.kind === 'cashflow') {
+    const netCls = rep.net >= 0 ? 'rm-value in' : 'rm-value out';
+    html += '<div class="report-grid">' +
+      '<div class="report-metric"><span class="rm-label">总流入</span><span class="rm-value in">' + TMPL_FMT(rep.totalIn) + '</span></div>' +
+      '<div class="report-metric"><span class="rm-label">总流出</span><span class="rm-value out">' + TMPL_FMT(rep.totalOut) + '</span></div>' +
+      '<div class="report-metric"><span class="rm-label">净额</span><span class="' + netCls + '">' + TMPL_FMT(rep.net) + '</span></div></div>';
+    html += '<div class="report-card"><div class="report-card-title">现金流结构（经营 / 投资 / 筹资）</div>' +
+      '<table class="tmpl-table"><thead><tr><th>类别</th><th class="num">流入</th><th class="num">流出</th><th class="num">净额</th><th class="num">笔数</th></tr></thead><tbody>';
+    ['经营', '投资', '筹资', '未分类'].forEach(k => {
+      const g = rep.sections[k] || { in: 0, out: 0, net: 0, count: 0 };
+      html += '<tr' + (k === '未分类' && g.count > 0 ? ' class="tmpl-warn"' : '') + '>' +
+        '<td>' + k + '</td>' +
+        '<td class="num">' + TMPL_FMT(g.in) + '</td>' +
+        '<td class="num">' + TMPL_FMT(g.out) + '</td>' +
+        '<td class="num">' + TMPL_FMT(g.net) + '</td>' +
+        '<td class="num">' + g.count + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    html += '<div class="report-hint-txt">说明：按「摘要 / 对方户名」关键词自动归类（如 工资/货款→经营，设备/股权→投资，贷款/利息→筹资）；未分类流水建议补充规则后重新生成。</div>';
+  }
+
+  $('reportView').innerHTML = html;
+  $('reportHint').textContent = '已生成：' + rep.title + '。可「导出 Excel / Word」或「打印/PDF」，或点击「AI 分析报告」生成 4 段式文字分析';
+}
+
+// 费用排行视图内切换 按分类 / 按供应商
+function toggleExpenseRank(by) {
+  buildExpenseRank(by);
+}
+
+// 出表模板导出 Excel（复用同一入口）
+function exportTemplateExcel() {
+  const rep = state.currentTemplate;
+  if (!rep) { showToast('请先生成出表模板', 'error'); return; }
+  const rows = [[rep.title], [], []];
+  if (rep.kind === 'income') {
+    rows[1] = ['项目', '本月(元)', '上月(元)', '去年同期(元)', '环比%', '同比%'];
+    rep.rows.forEach(r => rows.push([r.name, r.current, r.lastMonth, r.lastYear, r.momPct, r.yoyPct]));
+    rows.push(['收入合计', rep.totals.income.current, rep.totals.income.lastMonth, rep.totals.income.lastYear, '', '']);
+    rows.push(['支出合计', rep.totals.expense.current, rep.totals.expense.lastMonth, rep.totals.expense.lastYear, '', '']);
+    rows.push(['净额', rep.totals.net.current, rep.totals.net.lastMonth, rep.totals.net.lastYear, '', '']);
+  } else if (rep.kind === 'expenseRank') {
+    rows[1] = ['排名', rep.by === 'seller' ? '供应商' : '分类', '金额(元)', '占比%', '笔数'];
+    rep.rows.forEach(r => rows.push([r.rank, r.name, r.amount, r.pct, r.count]));
+    rows.push(['合计', '', rep.total, 100, rep.totalCount]);
+  } else if (rep.kind === 'cashflow') {
+    rows[1] = ['类别', '流入(元)', '流出(元)', '净额(元)', '笔数'];
+    ['经营', '投资', '筹资', '未分类'].forEach(k => {
+      const g = rep.sections[k] || { in: 0, out: 0, net: 0, count: 0 };
+      rows.push([k, g.in, g.out, g.net, g.count]);
+    });
+    rows.push(['合计', rep.totalIn, rep.totalOut, rep.net, rep.rows.length]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 8 }, { wch: 8 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '出表模板');
+  XLSX.writeFile(wb, rep.title.replace(/\s+/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.xlsx');
+  showToast('已导出出表模板 Excel', 'success');
+}
+
+/* ============ 导出 Word / 打印 PDF ============ */
+
+// 报表视图 → 内嵌样式的 HTML（供 Word/打印复用）
+const REPORT_PRINT_CSS = [
+  'body{font-family:"Microsoft YaHei",sans-serif;color:#1f2937;font-size:13px;margin:24px}',
+  'h2{text-align:center;margin-bottom:4px}',
+  '.report-sub{color:#888;font-size:12px;text-align:center;margin-bottom:16px}',
+  '.report-card{border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;margin:12px 0;page-break-inside:avoid}',
+  '.report-title{font-size:16px;font-weight:700;text-align:center}',
+  '.report-grid{display:flex;gap:12px;margin:12px 0}',
+  '.report-metric{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:10px;text-align:center}',
+  '.rm-label{display:block;color:#888;font-size:12px}.rm-value{display:block;font-size:18px;font-weight:700}.rm-value.in{color:#16a34a}.rm-value.out{color:#dc2626}',
+  '.report-card-title{font-weight:700;margin-bottom:8px}',
+  '.tmpl-table{width:100%;border-collapse:collapse;font-size:12.5px}',
+  '.tmpl-table th,.tmpl-table td{border:1px solid #e5e7eb;padding:6px 8px;text-align:left}',
+  '.tmpl-table th{background:#f3f4f6}.num{text-align:right;font-variant-numeric:tabular-nums}',
+  '.center{text-align:center}.tmpl-total td{font-weight:700;background:#f9fafb}',
+  '.tmpl-top td{background:#fff7ed}.tmpl-warn td{background:#fef2f2}',
+  '.rank-badge{display:inline-block;min-width:18px;text-align:center;border-radius:50%;color:#fff;font-size:11px;padding:1px 4px}',
+  '.rank-badge.top1{background:#dc2626}.rank-badge.top2{background:#ea580c}.rank-badge.top3{background:#d97706}',
+  '.report-hint-txt{color:#888;font-size:12px;margin-top:10px}',
+  '.md-body{line-height:1.8}.md-h1{font-size:15px;font-weight:700;margin:10px 0 6px}.md-h2{font-size:14px;font-weight:700;margin:10px 0 6px}',
+  '.md-h3{font-size:13px;font-weight:600;margin:8px 0 4px}.md-p{margin:6px 0}.md-list{margin:6px 0;padding-left:20px}',
+  '.view-tabs{display:none}',
+  '.tag,.issue-chip,.board-chip{display:none}'
+].join('');
+
+function reportViewToHtml(title) {
+  const bodyHtml = $('reportView') ? $('reportView').innerHTML : '';
+  return '<html><head><meta charset="utf-8"><style>' + REPORT_PRINT_CSS + '</style></head><body>' +
+    '<h2>' + esc(title) + '</h2>' +
+    '<div class="report-sub">票小帮 · 生成时间：' + new Date().toLocaleString('zh-CN') + '</div>' +
+    bodyHtml + '</body></html>';
+}
+
+function currentDocTitle() {
+  if (state.currentAnalysis) return 'AI 财务分析报告';
+  if (state.currentTemplate) return state.currentTemplate.title;
+  if (state.currentReport) return state.currentReport.title;
+  return '票小帮报表';
+}
+
+function exportReportWord() {
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) {
+    showToast('请先生成报表或分析报告', 'error');
+    return;
+  }
+  const html = reportViewToHtml(currentDocTitle());
+  const blob = new Blob(['\ufeff' + html], { type: 'application/msword;charset=utf-8' });
+  downloadBlob(blob, currentDocTitle().replace(/\s+/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.doc');
+  showToast('已导出 Word 文档（.doc）', 'success');
+}
+
+function exportReportPdf() {
+  if (!state.currentReport && !state.currentTemplate && !state.currentAnalysis) {
+    showToast('请先生成报表或分析报告', 'error');
+    return;
+  }
+  const html = reportViewToHtml(currentDocTitle());
+  const w = window.open('', '_blank', 'width=900,height=700');
+  if (!w) { showToast('浏览器拦截了打印窗口，请允许弹窗后重试', 'error'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  setTimeout(() => { w.focus(); w.print(); }, 300);
+  showToast('请在打印窗口中选择「另存为 PDF」或直接打印', 'success');
 }
 
 // 周一打开页面自动生成上周周报（仅本地统计，不发送邮件）
@@ -1768,17 +2337,28 @@ function init() {
 
   // 自动对账
   setupUpload('bankUploadBox', 'bankSelectBtn', 'bankFileInput', handleBankFiles);
+  setupUpload('bizUploadBox', 'bizSelectBtn', 'bizFileInput', handleBizFiles);
+  $('bizClearBtn').addEventListener('click', clearBizDocs);
   $('startReconBtn').addEventListener('click', startRecon);
   $('clearReconBtn').addEventListener('click', clearRecon);
   $('exportReconBtn').addEventListener('click', exportReconExcel);
   $('reconAiBtn').addEventListener('click', aiAnalyzeRecon);
+  $('reconViewTabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('.view-tab');
+    if (tab) switchReconView(tab.dataset.view);
+  });
 
   // 报表中心
   $('weekReportBtn').addEventListener('click', buildWeekly);
   $('monthReportBtn').addEventListener('click', buildMonthly);
+  $('incomeBtn').addEventListener('click', buildIncome);
+  $('expenseRankBtn').addEventListener('click', () => buildExpenseRank('category'));
+  $('cashflowBtn').addEventListener('click', buildCashflow);
   $('aiReportBtn').addEventListener('click', aiAnalyzeReport);
   $('copyBriefBtn').addEventListener('click', copyBrief);
   $('exportReportBtn').addEventListener('click', exportReportExcel);
+  $('reportWordBtn').addEventListener('click', exportReportWord);
+  $('reportPdfBtn').addEventListener('click', exportReportPdf);
 
   $('doMergeBtn').addEventListener('click', doMerge);
   setupLayoutButtons();

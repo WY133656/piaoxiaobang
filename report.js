@@ -240,6 +240,250 @@
     return lines.join('\n');
   }
 
+  /* ---------- 出表模板 1：损益对比表（本月 vs 上月 vs 去年同期） ---------- */
+
+  // ledger: 台账；opts: { year, month(1-12), isMyCompanyFn }
+  function buildIncomeStatement(ledger, opts) {
+    var o = opts || {};
+    var myFn = o.isMyCompanyFn || function () { return false; };
+    var now = o.now || new Date();
+    var y = o.year !== undefined ? o.year : now.getFullYear();
+    var m = o.month !== undefined ? o.month : now.getMonth() + 1;
+
+    var fmtM = function (yy, mm) { return yy + '-' + pad2(mm); };
+    var snap = function (yy, mm) {
+      var start = new Date(yy, mm - 1, 1);
+      var end = new Date(yy, mm, 0);
+      return buildFinancialSnapshot(ledger, {
+        from: fmtDate(start), to: fmtDate(end), isMyCompanyFn: myFn
+      });
+    };
+
+    var cur = snap(y, m);
+    var lastM = m === 1 ? snap(y - 1, 12) : snap(y, m - 1);
+    var lastY = snap(y - 1, m);
+
+    // 收入行（分类）∪ 支出行（分类）
+    var names = [];
+    [cur, lastM, lastY].forEach(function (s) {
+      s.inCategory.concat(s.outCategory).forEach(function (g) {
+        if (names.indexOf(g.name) < 0) names.push(g.name);
+      });
+    });
+    var byName = function (s, name) {
+      var g = s.inCategory.concat(s.outCategory).filter(function (x) { return x.name === name; })[0];
+      return g ? g.amount : 0;
+    };
+    var pct = function (a, b) { return b === 0 ? (a === 0 ? 0 : 100) : Math.round((a - b) / b * 100); };
+
+    var rows = names.map(function (name) {
+      var c = byName(cur, name), lm = byName(lastM, name), ly = byName(lastY, name);
+      return {
+        name: name,
+        current: c, lastMonth: lm, lastYear: ly,
+        momPct: pct(c, lm), yoyPct: pct(c, ly),
+        kind: cur.inCategory.filter(function (x) { return x.name === name; }).length ? 'income' : 'expense'
+      };
+    });
+    rows.sort(function (a, b) { return b.current - a.current; });
+
+    return {
+      kind: 'income',
+      title: y + '年' + m + '月损益对比表（本月 vs 上月 vs 去年同期）',
+      period: y + '年' + m + '月',
+      rows: rows,
+      totals: {
+        income: { current: cur.inAmount, lastMonth: lastM.inAmount, lastYear: lastY.inAmount },
+        expense: { current: cur.outAmount, lastMonth: lastM.outAmount, lastYear: lastY.outAmount },
+        net: { current: cur.netAmount, lastMonth: lastM.netAmount, lastYear: lastY.netAmount }
+      },
+      count: cur.count
+    };
+  }
+
+  /* ---------- 出表模板 2：费用明细排行（分类/供应商，Top3 高亮） ---------- */
+
+  // ledger: 台账；opts: { by: 'category'|'seller', year, month, limit }
+  function buildExpenseRanking(ledger, opts) {
+    var o = opts || {};
+    var myFn = o.isMyCompanyFn || function () { return false; };
+    var now = o.now || new Date();
+    var y = o.year !== undefined ? o.year : now.getFullYear();
+    var m = o.month !== undefined ? o.month : now.getMonth() + 1;
+    var by = o.by || 'category';
+    var limit = o.limit !== undefined ? o.limit : 10;
+    var start = new Date(y, m - 1, 1);
+    var end = new Date(y, m, 0);
+    var snap = buildFinancialSnapshot(ledger, { from: fmtDate(start), to: fmtDate(end), isMyCompanyFn: myFn });
+
+    var src = by === 'seller' ? snap.topSuppliers.map(function (x) { return { name: x.name, amount: x.amount, count: x.count }; })
+      : snap.outCategory.map(function (x) { return { name: x.name, amount: x.amount, count: x.count }; });
+    var rows = src.map(function (x, i) {
+      return { rank: i + 1, name: x.name, amount: x.amount, count: x.count, pct: snap.outAmount > 0 ? Math.round(x.amount / snap.outAmount * 100) : 0 };
+    });
+    var top3 = rows.slice(0, 3);
+    return {
+      kind: 'expenseRank',
+      title: y + '年' + m + '月费用明细排行（按' + (by === 'seller' ? '供应商' : '分类') + '）',
+      by: by, period: y + '年' + m + '月',
+      total: snap.outAmount, totalCount: snap.outCount,
+      top3: top3, rows: rows, limit: limit
+    };
+  }
+
+  /* ---------- 出表模板 3：现金流简表（经营/投资/筹资） ---------- */
+
+  // 默认归类关键词规则（可按摘要/对方户名命中）
+  var CASHFLOW_RULES = [
+    { type: '经营', keywords: ['工资', '社保', '公积金', '货款', '材料', '采购', '销售', '回款', '租金', '租赁', '房租', '水电', '办公', '差旅', '报销', '快递', '物流', '仓储', '推广', '广告', '税费', '发票', '劳务', '服务费', '运输'] },
+    { type: '投资', keywords: ['设备', '固定资产', '股权', '投资', '厂房', '无形资产', '车辆', '装修', '机器', '软件'] },
+    { type: '筹资', keywords: ['贷款', '借款', '还款', '利息', '分红', '注册资本', '股东', '融资', '担保'] }
+  ];
+
+  // bankRows: parseBankRows 输出；opts: { rules, period }
+  function buildCashflow(bankRows, opts) {
+    var o = opts || {};
+    var rules = o.rules || CASHFLOW_RULES;
+    var rows = (bankRows || []).map(function (r) {
+      var text = (r.counterparty || '') + ' ' + (r.summary || '');
+      var type = '';
+      for (var i = 0; i < rules.length; i++) {
+        var hit = rules[i].keywords.some(function (kw) { return text.indexOf(kw) >= 0; });
+        if (hit) { type = rules[i].type; break; }
+      }
+      return { date: r.date, counterparty: r.counterparty, direction: r.direction, amount: r.amount, type: type || '未分类' };
+    });
+
+    var group = {};
+    rows.forEach(function (r) {
+      if (!group[r.type]) group[r.type] = { in: 0, out: 0, count: 0 };
+      var g = group[r.type];
+      if (r.direction === 'in') g.in += r.amount; else g.out += r.amount;
+      g.count++;
+    });
+    var kinds = ['经营', '投资', '筹资', '未分类'];
+    var out = {};
+    var totalIn = 0, totalOut = 0;
+    kinds.forEach(function (k) {
+      var g = group[k] || { in: 0, out: 0, count: 0 };
+      out[k] = { in: round2(g.in), out: round2(g.out), net: round2(g.in - g.out), count: g.count };
+      totalIn += g.in; totalOut += g.out;
+    });
+    return {
+      kind: 'cashflow',
+      title: (o.period || '本期') + '现金流简表（经营 / 投资 / 筹资）',
+      period: o.period || '',
+      sections: out,
+      totalIn: round2(totalIn), totalOut: round2(totalOut),
+      net: round2(totalIn - totalOut),
+      rules: rules, rows: rows
+    };
+  }
+
+  /* ---------- 4 段式 AI 文字报告（用户方案） ---------- */
+
+  // data: { period, snapshot, cashflow, income, expenseRank, alerts }
+  // 返回 { system, user } —— 供 llmChat 调用；Prompt 约束"只基于数据，不捏造"
+  function buildAnalysisReportV2(data) {
+    var d = data || {};
+    var s = d.snapshot || {};
+    var cf = d.cashflow || {};
+    var inc = d.income || {};
+    var er = d.expenseRank || {};
+
+    var sys = '你是企业财务分析师。基于提供的统计数据，撰写约 500 字的中文财务简报，严格按 4 个固定段落：' +
+      '一、总体概览（收入/支出/净额 + 环比）；二、费用异动预警（异常波动分类，给出核查建议）；' +
+      '三、现金流健康度（经营/投资/筹资净额，判断资金安全垫）；四、业务提示（集中度、应收风险、待办事项）。' +
+      '只依据给定数据客观分析，禁止编造数字或事实；数字保留两位小数；简洁专业。';
+
+    var user = JSON.stringify({
+      period: d.period || '',
+      snapshot: {
+        inAmount: s.inAmount, outAmount: s.outAmount, netAmount: s.netAmount,
+        inCount: s.inCount, outCount: s.outCount,
+        inCategory: (s.inCategory || []).slice(0, 5),
+        outCategory: (s.outCategory || []).slice(0, 5),
+        topSuppliers: (s.topSuppliers || []).slice(0, 5),
+        topBuyers: (s.topBuyers || []).slice(0, 5)
+      },
+      alerts: d.alerts || [],
+      incomeStatement: inc.rows ? inc.rows.slice(0, 8) : [],
+      expenseRanking: er.rows ? er.rows.slice(0, 5) : [],
+      cashflow: cf.sections || {}
+    }, null, 2);
+    return { system: sys, user: user };
+  }
+
+  // 未配置大模型时的规则模板降级（同样 4 段结构）
+  function templateAnalysisV2(data) {
+    var d = data || {};
+    var s = d.snapshot || {};
+    var cf = d.cashflow || {};
+    var parts = [];
+
+    // 一、总体概览
+    var net = s.netAmount;
+    var netText = net >= 0 ? '净额 +¥' + fmtAmount(net) : '净额 ¥' + fmtAmount(net);
+    parts.push('一、总体概览');
+    parts.push('本期收入 ¥' + fmtAmount(s.inAmount) + '（' + (s.inCount || 0) + ' 笔），支出 ¥' + fmtAmount(s.outAmount) +
+      '（' + (s.outCount || 0) + ' 笔），' + netText + '。');
+    if (d.alerts && d.alerts.length) {
+      parts.push('环比提醒 ' + d.alerts.length + ' 条，详见下文。');
+    }
+
+    // 二、费用异动预警
+    parts.push('二、费用异动预警');
+    if (d.alerts && d.alerts.length) {
+      d.alerts.slice(0, 3).forEach(function (a) {
+        parts.push('- ' + a.text + '。');
+      });
+      parts.push('建议逐项核查波动原因，确认是否为一次性支出或业务正常变化。');
+    } else if (s.outCategory && s.outCategory.length) {
+      var top = s.outCategory[0];
+      parts.push('本期支出最高分类为「' + top.name + '」¥' + fmtAmount(top.amount) + '，占总支出 ' +
+        (s.outAmount > 0 ? Math.round(top.amount / s.outAmount * 100) : 0) + '%，环比无显著异常波动。');
+    } else {
+      parts.push('本期无显著费用波动。');
+    }
+
+    // 三、现金流健康度
+    parts.push('三、现金流健康度');
+    if (cf.sections) {
+      var op = cf.sections['经营'];
+      if (op) {
+        parts.push('经营性净现金流 ¥' + fmtAmount(op.net) + '（流入 ¥' + fmtAmount(op.in) + ' / 流出 ¥' + fmtAmount(op.out) + '）' +
+          (op.net >= 0 ? '，经营造血能力正常，资金安全垫充足。' : '，经营净流出，需关注垫付资金压力。'));
+      }
+      ['投资', '筹资'].forEach(function (k) {
+        var g = cf.sections[k];
+        if (g && g.count > 0) parts.push(k + '性现金流净额 ¥' + fmtAmount(g.net) + '（流入 ¥' + fmtAmount(g.in) + ' / 流出 ¥' + fmtAmount(g.out) + '）。');
+      });
+      var un = cf.sections['未分类'];
+      if (un && un.count > 0) parts.push('另有 ' + un.count + ' 笔流水未能自动分类（合计 ¥' + fmtAmount(un.in + un.out) + '），建议补充归类规则。');
+    } else {
+      parts.push('暂未导入银行流水，无法评估现金流结构。');
+    }
+
+    // 四、业务提示
+    parts.push('四、业务提示');
+    var tips = [];
+    if (s.topSuppliers && s.topSuppliers.length) {
+      var s0 = s.topSuppliers[0];
+      var share = s.outAmount > 0 ? Math.round(s0.amount / s.outAmount * 100) : 0;
+      if (share >= 40) tips.push('供应商集中度偏高：最大供应商 ' + s0.name + ' 占支出 ' + share + '%，建议评估备选供应商以分散风险。');
+    }
+    if (s.topBuyers && s.topBuyers.length) {
+      var b0 = s.topBuyers[0];
+      var bshare = s.inAmount > 0 ? Math.round(b0.amount / s.inAmount * 100) : 0;
+      if (bshare >= 40) tips.push('客户集中度偏高：最大客户 ' + b0.name + ' 占收入 ' + bshare + '%，关注大客户回款与续约。');
+    }
+    if (s.incompleteCount > 0) tips.push('有 ' + s.incompleteCount + ' 张发票字段不完整，建议尽快补全以保证对账与报表准确。');
+    if (d.period) tips.push('本月账期结账前，请复核未匹配流水与未核销单据（见「对账」页红蓝橙异议清单）。');
+    if (!tips.length) tips.push('本期经营数据整体平稳，维持现有节奏，定期复核异常即可。');
+    tips.forEach(function (t) { parts.push('- ' + t); });
+    return parts.join('\n');
+  }
+
   /* ---------- AI 分析 ---------- */
 
   function buildAnalysisPrompt(snap) {
@@ -290,7 +534,13 @@
     buildMonthlyReport: buildMonthlyReport,
     buildBriefText: buildBriefText,
     buildAnalysisPrompt: buildAnalysisPrompt,
-    templateAnalysis: templateAnalysis
+    templateAnalysis: templateAnalysis,
+    buildIncomeStatement: buildIncomeStatement,
+    buildExpenseRanking: buildExpenseRanking,
+    buildCashflow: buildCashflow,
+    CASHFLOW_RULES: CASHFLOW_RULES,
+    buildAnalysisReportV2: buildAnalysisReportV2,
+    templateAnalysisV2: templateAnalysisV2
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = Report;

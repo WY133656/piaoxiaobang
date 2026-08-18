@@ -256,10 +256,25 @@
             <button class="btn btn-primary" id="bankSelectBtn">选择文件</button>
             <input type="file" id="bankFileInput" accept=".xlsx,.xls" multiple hidden>
           </div>
+          <div class="upload-box upload-box-alt" id="bizUploadBox">
+            <div class="upload-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+              </svg>
+            </div>
+            <div class="upload-title">上传业务单据 Excel（应收/应付模板）</div>
+            <div class="upload-hint">业务单号 / 类型 / 客户供应商 / 金额 / 预计到账日期</div>
+            <button class="btn btn-primary" id="bizSelectBtn">选择文件</button>
+            <button class="btn btn-ghost btn-sm" id="bizClearBtn">清空单据</button>
+            <input type="file" id="bizFileInput" accept=".xlsx,.xls,.csv" multiple hidden>
+          </div>
           <div class="upload-tips">
             <p>从网银导出的流水表（交易日期 / 对方户名 / 收入 / 支出 / 余额）</p>
-            <p>与发票台账自动匹配：金额 + 对方名称 + 方向 + 日期窗口</p>
-            <p>数据仅在浏览器本地处理，不会上传服务器</p>
+            <p>业务单据为可选参照：导入后走「阶梯式匹配」（L1 强匹配 / L2 容差 ±5元·3天 / L3 模糊确认）</p>
+            <p>未导入单据时自动退化为「与发票台账匹配」，并生成红蓝橙待办异议表与回款看板</p>
           </div>
           <button class="btn btn-primary btn-block" id="startReconBtn" disabled>开始对账</button>
         </aside>
@@ -271,24 +286,29 @@
               <span class="result-meta" id="reconMeta">请先上传银行流水</span>
             </div>
             <div class="result-actions">
+              <div class="view-tabs" id="reconViewTabs" hidden>
+                <button class="view-tab active" data-view="detail">对账明细</button>
+                <button class="view-tab" data-view="issues">待办异议表</button>
+                <button class="view-tab" data-view="board">回款看板</button>
+              </div>
               <button class="btn btn-ghost" id="reconAiBtn" disabled title="大模型分析未匹配流水的原因">AI 分析未匹配</button>
               <button class="btn btn-ghost" id="clearReconBtn" disabled>清空</button>
               <button class="btn btn-primary" id="exportReconBtn" disabled>导出 Excel</button>
             </div>
           </div>
           <div class="recon-stats" id="reconStats"></div>
-          <div class="table-wrap">
+          <div class="table-wrap" id="reconViewDetail">
             <table class="invoice-table" id="reconTable">
               <thead>
                 <tr>
-                  <th style="width:10%">交易日期</th>
-                  <th style="width:22%">对方户名/摘要</th>
-                  <th style="width:8%" class="center">方向</th>
-                  <th style="width:10%" class="num">流水金额</th>
-                  <th style="width:8%" class="center">状态</th>
-                  <th style="width:14%">匹配发票号码</th>
-                  <th style="width:13%">匹配对方</th>
-                  <th style="width:10%">发票日期</th>
+                  <th style="width:9%">交易日期</th>
+                  <th style="width:20%">对方户名/摘要</th>
+                  <th style="width:7%" class="center">方向</th>
+                  <th style="width:9%" class="num">流水金额</th>
+                  <th style="width:9%" class="center">状态</th>
+                  <th style="width:12%">匹配业务单号</th>
+                  <th style="width:12%">匹配对方</th>
+                  <th style="width:9%">差异</th>
                   <th style="width:18%">原因/提示</th>
                 </tr>
               </thead>
@@ -296,6 +316,14 @@
                 <tr class="empty-row"><td colspan="9">上传银行流水并点击「开始对账」</td></tr>
               </tbody>
             </table>
+          </div>
+          <div id="reconViewIssues" hidden>
+            <div class="issues-summary" id="issuesSummary"></div>
+            <div class="issues-list" id="issuesList"></div>
+          </div>
+          <div id="reconViewBoard" hidden>
+            <div class="board-summary" id="boardSummary"></div>
+            <div class="board-grid" id="boardGrid"></div>
           </div>
           <div class="ai-report" id="reconAiResult" hidden></div>
         </div>
@@ -308,14 +336,19 @@
           <div class="report-actions">
             <button class="btn" id="weekReportBtn">生成上周周报</button>
             <button class="btn" id="monthReportBtn">生成上月月报</button>
+            <button class="btn" id="incomeBtn">损益对比表</button>
+            <button class="btn" id="expenseRankBtn">费用排行</button>
+            <button class="btn" id="cashflowBtn">现金流简表</button>
             <button class="btn btn-primary" id="aiReportBtn">AI 分析报告</button>
             <button class="btn btn-ghost" id="copyBriefBtn">复制简报</button>
             <button class="btn btn-ghost" id="exportReportBtn">导出 Excel</button>
+            <button class="btn btn-ghost" id="reportWordBtn">导出 Word</button>
+            <button class="btn btn-ghost" id="reportPdfBtn">打印/PDF</button>
           </div>
-          <div class="report-hint" id="reportHint">数据来自本地发票台账；周一打开页面会自动生成上周周报（仅统计，不发邮件）。</div>
+          <div class="report-hint" id="reportHint">数据来自本地发票台账；周报/月报/出表模板均在页面内查看，可复制简报或导出 Excel / Word / PDF（不发邮件）。</div>
         </div>
         <div class="report-view" id="reportView">
-          <div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / AI 分析报告将显示在这里</div>
+          <div class="report-empty">点击上方按钮生成业务报表<br>周报 / 月报 / 损益对比 / 费用排行 / 现金流简表 / AI 分析报告将显示在这里</div>
         </div>
       </div>
     </section>
