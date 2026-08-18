@@ -39,15 +39,20 @@
     return '电子普票';
   }
 
-  /* ---------- 商品/项目摘要 ---------- */
-
+  /* ---------- 商品/项目摘要 ----------
+   * 数电票表头格式："项目名称   规格型号   单   位   数   量   单   价   金   额   税率/征收率   税   额"
+   * pdf.js 在中文间插了空格，总长度 55-70 字符；老阈值 50 会过滤掉，需要放宽。
+   * 商品行常见格式："*交通运输*橡胶路锥   个   30 2.83 85.15   1% 0.85"，摘要只保留
+   * `*xxx*yyy` 主体 + 跨行接续的纯中文规格（避免把单位/数量/金额/税率等明细带进摘要）。
+   */
   function extractSummary(rawText) {
     if (!rawText) return '';
     const lines = String(rawText).split('\n').map(l => l.trim());
     let start = -1;
+    // 表头行宽松匹配：含"项目名称/货物或应税劳务/服务名称/商品名称/劳务名称"任一关键词即视为表头
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      if (l && l.length < 50 && /项目名称|货物或应税劳务|服务名称|商品名称|劳务名称/.test(l)) {
+      if (l && /项目名称|货物或应税劳务|服务名称|商品名称|劳务名称/.test(l)) {
         start = i + 1;
         break;
       }
@@ -60,20 +65,47 @@
         break;
       }
     }
+    // 表头过滤（含列名）
     const headerRe = /^(项目名称|规格型号|单位|数量|单价|金额|税率|税额|价税合计|备注|销售方|购买方|开票人|复核|收款人|发票号码|开票日期|校验码)\s*$/;
-    const rows = lines.slice(start, end).filter(l => {
-      if (!l || l.length < 2) return false;
-      if (headerRe.test(l)) return false;
-      if (l === '合计' || /^合计\s*[¥￥]?/.test(l)) return false;
-      // 过滤纯数字明细行（如"只 5 15.64 78.20 1% 0.78"、"¥78.20 ¥0.78"），只保留商品名称
+    // 明细数字行过滤：被空格打断的纯数字（如"只   5 15.64 78.20   1% 0.78"）
+    const isDetailRow = (l) => {
       const textOnly = l.replace(/[\d,.¥￥%\/()（）\s]/g, '');
-      if (textOnly.length < 2) return false;
-      return true;
-    });
+      return textOnly.length < 2;
+    };
+    // 跨行接续识别：纯中文/字母/数字/横线（无空格）通常是规格型号描述行
+    // 不再自动合并到上一行（合并会污染主行内的数字明细截断），改为独立保留为规格行
+    const isContinuation = (l) => l && /^[\u4e00-\u9fa5*A-Za-z·\-（）()0-9]+$/.test(l) && l.length >= 2 && l.length <= 80;
+
+    const rows = [];
+    for (let i = start; i < end; i++) {
+      const l = lines[i];
+      if (!l || l.length < 2) continue;
+      if (headerRe.test(l)) continue;
+      if (l === '合计' || /^合计\s*[¥￥]?/.test(l)) continue;
+      if (isDetailRow(l)) continue;
+      rows.push(l);
+    }
     if (rows.length === 0) return '';
-    let text = rows.join(' ');
-    if (text.length > 220) text = text.slice(0, 220);
-    return text;
+    // 摘要主体：每行只保留 `*xxx*yyy*zzz` 星链 + 冒号属性（颜色分类:xxx等），
+    // 数字明细（单位/数量/单价/金额/税率/税额）一律不入摘要；
+    // 无星链的纯规格/描述行（如"框-超薄款30CM-24W白光"）独立保留
+    const takeMain = (s) => {
+      const star = s.match(/\*[^*\s]+(?:\*[^*\s]+)*/);
+      if (star) {
+        let main = star[0];
+        const rest = s.slice(star.index + star[0].length);
+        const attr = rest.match(/^\s*((?:颜色|分类|型号|规格|颜色分类)[：:][^\s]+)/);
+        if (attr) main += ' ' + attr[1].trim();
+        return main;
+      }
+      // 纯数字明细行不入摘要
+      if (/^[\d\s,.¥￥%\/()（）]+$/.test(s)) return '';
+      // 纯文本（接续规格行）保留
+      return s;
+    };
+    const out = rows.map(takeMain).filter(Boolean).join('；');
+    if (out.length > 220) return out.slice(0, 220) + '…';
+    return out;
   }
 
   /* ---------- 销售方简称 ---------- */
@@ -177,11 +209,19 @@
     const isExpress = /快递|收派|顺丰/.test(sum);
     const isPrinter = /打印|票据打|打印机/.test(sum) && !/纸|标签/.test(sum);
     const isVeg = /蔬菜/.test(sum);
+    const isOffice = CAT_OFFICE.some(k => sum.includes(k)) || /办公|文具|耗材|硒鼓|墨盒/.test(sum);
+    // isBuild：商品含建设关键词（如路锥/灯具/建材等）即视为建设物资采购；
+    // 仅当卖家整名就是"XX设备公司/仪表公司"（明显不是建设类采购商）时排除
+    const isBuild = CAT_BUILD.some(k => sum.includes(k)) && !/设备(有限|公司)|仪表(有限|公司)/.test(inv.seller || '');
+    const isLowvalue = CAT_LOWVALUE.some(k => sum.includes(k));
     const isSpec = /专票/.test(t);
+    const isAsset = /打印机|电脑|笔记本|台式机|服务器|空调|投影|复印机|碎纸机|保险柜|家具/.test(sum) && total >= 1000;
     const big = total >= 5000, mid = total >= 2000, small = total >= 1000;
     const yuan = (n) => { const r = round2(n); return Number.isInteger(r) ? String(r) : r.toFixed(2); };
 
-    if (isPrinter) out.push('固定资产(打印机¥' + yuan(total) + ')，需附资产验收单及固定资产登记表');
+    // 1) 特殊情况：专票、固定资产、快递、餐费、广告、福利
+    if (isSpec) out.push('增值税专用发票，需附发票认证结果(抵扣联)');
+    if (isAsset) out.push('固定资产(¥' + yuan(total) + ')，需附资产验收单、固定资产登记表及采购合同');
     if (isExpress) out.push('快递费，备注栏注明项目邮递资料');
     if (isFood) {
       if (big) out.push('大额餐费(¥' + yuan(total) + ')，需附菜单、就餐人员名单及业务招待事由说明');
@@ -192,17 +232,31 @@
       out.push('福利费支出(¥' + yuan(total) + ')，需附发放签收表/人员名单');
     } else if (isVeg && big) {
       out.push('大额采购(¥' + yuan(total) + ')，蔬菜采购需附采购明细清单及验收单；免税发票');
-    } else if (isSpec && big) {
-      out.push('增值税专用发票，大额采购(¥' + yuan(total) + ')，需附采购合同、明细清单及发票认证结果');
-    } else if (isSpec) {
-      out.push('增值税专用发票，需附发票认证结果(抵扣联)');
+    } else if (isBuild) {
+      // 2) 建设物资类采购
+      if (big) out.push('建设物资采购(¥' + yuan(total) + ')，需附采购合同、验收单及出入库单');
+      else if (mid) out.push('建设物资采购(¥' + yuan(total) + ')，建议附采购合同及验收单');
+      else if (small) out.push('建设物资采购(¥' + yuan(total) + ')，建议附验收单');
+      else out.push('建设物资采购(¥' + yuan(total) + ')，保留发票及付款凭证');
+    } else if (isOffice) {
+      // 3) 办公用品/耗材
+      if (big) out.push('办公用品采购(¥' + yuan(total) + ')，需附采购清单及验收单');
+      else if (small) out.push('办公用品采购(¥' + yuan(total) + ')，保留发票及领用登记');
+      else out.push('办公用品采购(¥' + yuan(total) + ')，保留发票备查');
+    } else if (isLowvalue) {
+      // 4) 低值易耗品
+      if (mid) out.push('低值易耗品采购(¥' + yuan(total) + ')，建议附领用登记');
+      else out.push('低值易耗品采购(¥' + yuan(total) + ')，保留发票及领用登记');
     } else if (big) {
       out.push('大额采购(¥' + yuan(total) + ')，需附采购合同及验收单');
     } else if (mid) {
-      out.push('大额采购(¥' + yuan(total) + ')，建议附采购合同及验收单');
+      out.push('中额采购(¥' + yuan(total) + ')，建议附采购合同及验收单');
     } else if (small) {
-      out.push('大额采购(¥' + yuan(total) + ')，建议附采购合同');
+      out.push('普通采购(¥' + yuan(total) + ')，建议附采购验收单');
+    } else if (total > 0) {
+      out.push('小额采购(¥' + yuan(total) + ')，保留发票及付款凭证备查');
     }
+    // 5) 购买方非本公司提示
     if (MY_COMPANY && inv.buyer && inv.buyer !== MY_COMPANY) {
       out.push('购买方为' + inv.buyer + '，非本公司，需说明费用归属关系或提供代付说明');
     }
