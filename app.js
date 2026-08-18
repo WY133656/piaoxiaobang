@@ -1832,10 +1832,11 @@ function renderFinFileList() {
     const badge = st.type === 'income' ? 'income' : st.type === 'balance' ? 'balance' : st.type === 'cashflow' ? 'cashflow' : 'unknown';
     const label = st.label || '未识别';
     const period = st.period ? ' · ' + st.period : '';
+    const unit = st.unit && st.unit !== '元' ? ' · ' + st.unit : '';
     return '<div class="fin-file-item">' +
       '<span class="fin-file-badge ' + badge + '">' + label + '</span>' +
       '<span class="fin-file-name" title="' + esc(st.fileName || '') + '">' + esc(st.fileName || '') + '</span>' +
-      '<span class="fin-file-meta">' + st.items.length + ' 科目' + period + '</span>' +
+      '<span class="fin-file-meta">' + st.items.length + ' 科目' + period + unit + '</span>' +
       '<button class="fin-file-del" data-idx="' + i + '" title="移除">×</button>' +
       '</div>';
   }).join('');
@@ -1861,14 +1862,19 @@ function analyzeFin() {
 }
 
 function renderFinAnalysis(res) {
-  const fmt = (n) => '¥' + (n === null || n === undefined ? 0 : n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const unitLabel = res.unit && res.unit !== '元' ? res.unit : '';
+  const fmt = (n) => {
+    const v = (n === null || n === undefined ? 0 : n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return unitLabel ? v + ' ' + unitLabel : '¥' + v;
+  };
   const fmtPct = (n) => (n === null || n === undefined ? 0 : n).toFixed(1) + '%';
   const fmtRatio = (n) => (n === null || n === undefined ? 0 : n).toFixed(2);
 
   let html = '';
   // 头部
   html += '<div class="report-card report-head"><div class="report-title">' + esc(res.title) + '</div>' +
-    '<div class="report-sub">基于 ' + res.sourceCount + ' 张已上传财务报表 · 自动取数生成，数据仅来自你提供的报表文件</div></div>';
+    '<div class="report-sub">基于 ' + res.sourceCount + ' 张已上传财务报表 · 自动取数生成，数据仅来自你提供的报表文件' +
+    (unitLabel ? ' · 金额单位：' + esc(unitLabel) : '') + '</div></div>';
 
   // 预警区
   if (res.alerts.length) {

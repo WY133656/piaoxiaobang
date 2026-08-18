@@ -133,7 +133,7 @@ const ocrLines = [
   '管理费用 60,000'
 ];
 const finRows = FinStat.textLinesToRows(ocrLines);
-check('OCR 行：有效科目行数 4（跳过编制单位/日期/带引号行）', finRows.length === 4, finRows.length + ' → ' + JSON.stringify(finRows));
+check('OCR 行：有效科目行数 5（跳过编制单位/日期行；带注释科目行保留）', finRows.length === 5, finRows.length + ' → ' + JSON.stringify(finRows));
 check('OCR 行：营业收入金额解析', finRows[0] && finRows[0][0] === '营业收入' && finRows[0][1] === '1234567.89' && finRows[0][2] === '987654.32', JSON.stringify(finRows[0]));
 check('OCR 行：无空格行解析（营业成本 890000.00）', finRows[1] && finRows[1][0] === '营业成本' && finRows[1][1] === '890000.00', JSON.stringify(finRows[1]));
 

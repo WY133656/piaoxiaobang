@@ -145,10 +145,56 @@
   function isMetaRow(cells, nameCol) {
     var name = trim(cells[nameCol]);
     if (!name) return true;
-    if (/^(单位|编制单位|会计期间|报表日期|日期|金额单位|单位：|制表|审核|会计主管|会企|会财|第\s*\d+\s*页)/.test(name)) return true;
+    if (/^(单位|编制单位|会计期间|报表日期|报表项目|日期|金额单位|单位：|制表|审核|会计主管|会企|会财|第\s*\d+\s*页)/.test(name)) return true;
     if (/^\d+(\.\d+)?$/.test(name)) return true; // 纯数字行次残留
     if (/^行次|^项目/.test(name)) return true;
     return false;
+  }
+
+  /* ---------- 多期日期表头识别（上市公司对比报表 / 东财新浪下载格式） ----------
+   * 形态：['报表日期','2026-03-31','2025-12-31',...] 或 ['科目','2024-03-31',...]
+   * 第一列为科目名，其后连续 ≥2 个日期列 → curCol=第1个日期列, prevCol=第2个日期列
+   */
+  function findDateHeader(rows) {
+    var limit = Math.min(rows.length, 60);
+    for (var i = 0; i < limit; i++) {
+      var row = rows[i] || [];
+      var dateCols = [];
+      for (var j = 0; j < row.length; j++) {
+        var t = trim(row[j]);
+        if (t && isDateTok(t)) dateCols.push(j);
+      }
+      if (dateCols.length >= 2 && dateCols[1] === dateCols[0] + 1) {
+        var nameCol = dateCols[0] - 1;
+        if (nameCol < 0) nameCol = 0;
+        return { idx: i, nameCol: nameCol, curCol: dateCols[0], prevCol: dateCols[1], dateCount: dateCols.length };
+      }
+    }
+    return null;
+  }
+
+  // 从 rows 中提取金额单位：优先 textLinesToRows 输出的 ['单位','亿元'] 行，
+  // 兜底扫描前 15 行任意单元格（如 ['编制单位：XX公司','2026年8月','单位：元']）
+  function extractUnit(rows) {
+    var limit = Math.min(rows.length, 15);
+    for (var i = 0; i < limit; i++) {
+      var row = rows[i] || [];
+      if (trim(row[0]) === '单位' && row[1]) return trim(row[1]);
+      for (var j = 0; j < Math.min(row.length, 8); j++) {
+        var u = extractUnitFromLine(trim(row[j]));
+        if (u) return u;
+      }
+    }
+    return '';
+  }
+
+  // 日期串 → 期间显示（'2026-03-31' → '2026年3月'）
+  function dateToPeriod(t) {
+    var m = trim(t).match(/^(\d{4})[-\/.](\d{1,2})/);
+    if (m) return m[1] + '年' + Number(m[2]) + '月';
+    m = trim(t).match(/^(\d{4})年(\d{1,2})月/);
+    if (m) return m[1] + '年' + Number(m[2]) + '月';
+    return '';
   }
 
   /* ---------- 解析单张报表 ----------
@@ -158,17 +204,28 @@
   function parseStatement(rows) {
     var src = (rows || []).filter(function (r) { return Array.isArray(r) && r.some(function (c) { return trim(c) !== ''; }); });
     var typeInfo = detectStatementType(src);
+    var unit = extractUnit(src);
     var header = findHeader(src);
+    var dateHeader = null, period = extractPeriod(src);
     if (!header) {
-      return { type: typeInfo.type, label: typeInfo.label, title: extractTitle(src), period: extractPeriod(src), items: [], mapping: null, rowCount: src.length };
+      // 兜底：多期日期表头（上市公司对比报表）
+      dateHeader = findDateHeader(src);
+      if (dateHeader) period = dateToPeriod(src[dateHeader.idx][dateHeader.curCol]) || period;
     }
+    if (!header && !dateHeader) {
+      return { type: typeInfo.type, label: typeInfo.label, title: extractTitle(src), period: period, unit: unit, items: [], mapping: null, rowCount: src.length };
+    }
+    var nameCol = header ? header.nameCol : dateHeader.nameCol;
+    var curCol = header ? header.curCol : dateHeader.curCol;
+    var prevCol = header ? header.prevCol : dateHeader.prevCol;
+    var start = header ? header.idx + 1 : dateHeader.idx + 1;
     var items = [];
-    for (var i = header.idx + 1; i < src.length; i++) {
+    for (var i = start; i < src.length; i++) {
       var row = src[i];
-      if (isMetaRow(row, header.nameCol)) continue;
-      var name = trim(row[header.nameCol]);
-      var cur = header.curCol >= 0 ? normalizeAmount(row[header.curCol]) : null;
-      var prev = header.prevCol >= 0 ? normalizeAmount(row[header.prevCol]) : null;
+      if (isMetaRow(row, nameCol)) continue;
+      var name = trim(row[nameCol]);
+      var cur = curCol >= 0 ? normalizeAmount(row[curCol]) : null;
+      var prev = prevCol >= 0 ? normalizeAmount(row[prevCol]) : null;
       if (cur === null && prev === null) continue;
       // 跳过合计/总计行（保留用于指标，但标记）
       var isTotal = /(合计|总计|净额)/.test(name);
@@ -176,35 +233,95 @@
     }
     return {
       type: typeInfo.type, label: typeInfo.label,
-      title: extractTitle(src), period: extractPeriod(src),
+      title: extractTitle(src), period: period, unit: unit,
       items: items,
-      mapping: { nameCol: header.nameCol, curCol: header.curCol, prevCol: header.prevCol },
+      mapping: { nameCol: nameCol, curCol: curCol, prevCol: prevCol, mode: header ? 'standard' : 'date-columns' },
       rowCount: src.length
     };
   }
 
   /* ---------- OCR / PDF 文本行 → 表格行 ----------
-   * 输入 ["营业收入 1234567.89", ...] 或 [["营业收入 1234567.89"], ...]
-   * 输出 [[科目, 金额1, 金额2?], ...]，可交给 parseStatement
+   * 输入 ["货币资金 487.87 516.91 517.53 516.45", ...] 或 [["营业收入 1234567.89"], ...]
+   * 输出 [[科目, 金额1, 金额2, ...], ...]，可交给 parseStatement
+   * 支持三类形态（上市公司多期对比报表 / 标准单期报表 / OCR 无空格行）：
+   *   A. 全日期行 "2026-03-31 2025-12-31 ..."          → ['报表日期', '2026-03-31', ...]
+   *   B. 科目 + 1~8 个金额（"—" 为空值占位）            → [科目, v1, v2, ...]
+   *   C. 无空格行 "营业收入1,234,567.89"                → ['营业收入', '1234567.89']
+   * 另外识别 "单位：人民币/亿元" → ['单位','亿元']；遇到 主要财务比率/数据来源/重要声明
+   * 等结尾声明区标记后停止（避免把比率分析、免责声明当科目行）。
    */
+  function isDateTok(t) {
+    return /^\d{4}[-\/.]\d{1,2}(?:[-\/.]\d{1,2})?$/.test(t) || /^\d{4}年\d{1,2}月/.test(t);
+  }
+
+  // 金额 token：纯数字/千分位/括号负数/负号；"—" "-" 为空值占位（不算有效金额）
+  function isValTok(t) {
+    if (/^[-—–─]{1,3}$/.test(t)) return true;
+    return /^(?:[(（][-−]?[\d,，]+(?:\.\d+)?[)）]|[-−]?[\d,，]+(?:\.\d+)?)$/.test(t);
+  }
+
+  function isDashTok(t) {
+    return /^[-—–─]{1,3}$/.test(t);
+  }
+
+  var STOP_RE = /^(主要财务比率|财务比率分析|财务指标|数据来源|重要声明|报告期[:：]|计量单位|合并口径[:：]|投资有风险|审计报告|附注)/;
+
+  // 从一行文本中提取金额单位（扫所有 "单位：" 出现处，取 20 字符窗口判断量级）
+  function extractUnitFromLine(s) {
+    var re = /(?:计量)?单位[:：]/g, m;
+    while ((m = re.exec(s)) !== null) {
+      var seg = s.slice(m.index, m.index + 20);
+      if (seg.indexOf('%') >= 0 || seg.indexOf('％') >= 0) continue;
+      if (seg.indexOf('亿') >= 0) return '亿元';
+      if (seg.indexOf('万') >= 0) return '万元';
+      if (seg.indexOf('元') >= 0) return '元';
+    }
+    return '';
+  }
+
   function textLinesToRows(lines) {
-    var out = [];
+    var out = [], stopped = false;
     (lines || []).forEach(function (ln) {
+      if (stopped) return;
       var s = trim(Array.isArray(ln) ? ln.join(' ') : ln);
       if (!s) return;
-      // 跳过明显非科目行
-      if (/^(单位|编制|会计期间|报表日期|日期|金额|会企|制表|审核|注|第)\s*[:：]/.test(s)) return;
-      if (/^\d{4}\s*[年\-\/]/.test(s) && !/\d/.test(s.replace(/^\d{4}\s*[年\-\/].*/, ''))) return; // 日期行
-      // 形态1："科目 金额" / "科目 金额 金额"（空格/制表分隔）
-      var m = s.match(/^([\u4e00-\u9fa5A-Za-z（）()·、和与%％\d]+?)\s+(-?[\d,，.]+)\s*(-?[\d,，.]+)?\s*$/);
-      if (!m) {
-        // 形态2：OCR 无空格 "营业收入1,234,567.89"
-        m = s.match(/^([\u4e00-\u9fa5A-Za-z（）()·、和与%％]+?)(-?[\d,，.]+)\s*(-?[\d,，.]+)?\s*$/);
+      // 结尾声明/比率分析区 → 截断后续全部行
+      if (STOP_RE.test(s)) { stopped = true; return; }
+      // 元信息行
+      if (/^(单位|编制单位|会计期间|报表日期|日期|金额单位|会企|制表|审核|会计主管)\s*[:：]?/.test(s) && !/\d{4}[-\/年]/.test(s)) {
+        var u = extractUnitFromLine(s);
+        if (u) out.push(['单位', u]);
+        return;
       }
-      if (!m) return;
-      var name = m[1].trim();
-      if (!/[\u4e00-\u9fa5]/.test(name) || /^(合计|总计)$/.test(name)) return;
-      out.push([name, m[2].replace(/,/g, '').replace(/，/g, ''), m[3] ? m[3].replace(/,/g, '').replace(/，/g, '') : '']);
+      // 单位说明混在标题/说明行里（如 "资产负债表（合并口径） 单位：人民币 / 亿元"）
+      var um2 = extractUnitFromLine(s);
+      if (um2) { out.push(['单位', um2]); return; }
+
+      var toks = s.split(/\s+/);
+      // 形态A：全为日期 → 报表日期表头行（多期对比报表）
+      if (toks.length >= 2 && toks.every(isDateTok)) {
+        out.push(['报表日期'].concat(toks));
+        return;
+      }
+      // 形态C：单 token 无空格 "营业收入1,234,567.89"
+      if (toks.length === 1) {
+        var m1 = s.match(/^([\u4e00-\u9fa5A-Za-z（）()·、和与%％]+?)([-−(（]?[\d,，.]+[)）]?)$/);
+        if (m1 && /[\u4e00-\u9fa5]/.test(m1[1]) && !/^(合计|总计)$/.test(m1[1]) && !/\d{4}/.test(m1[1])) {
+          out.push([m1[1], m1[2].replace(/,/g, '').replace(/，/g, '')]);
+        }
+        return;
+      }
+      // 形态B：科目 + 数值后缀（1~8 个，"—" 视为空值）
+      var vi = toks.length;
+      while (vi > 0 && isValTok(toks[vi - 1])) vi--;
+      if (vi === 0 || vi === toks.length) return; // 全数值行 / 无数值行
+      var name = toks.slice(0, vi).join('');
+      if (!/[\u4e00-\u9fa5]/.test(name)) return;
+      if (/^(合计|总计)$/.test(name)) return;
+      if (/\d{4}/.test(name)) return; // 含年份的比率标题（如 资产负债率（2026Q1））
+      var vals = toks.slice(vi).map(function (t) { return isDashTok(t) ? '' : t.replace(/,/g, '').replace(/，/g, ''); });
+      if (vals.length > 8) return;
+      out.push([name].concat(vals));
     });
     return out;
   }
@@ -255,6 +372,7 @@
 
     var indicators = [], checks = [], alerts = [];
     var period = o.period || income && income.period || balance && balance.period || cashflow && cashflow.period || '';
+    var unit = balance && balance.unit || income && income.unit || cashflow && cashflow.unit || '元';
 
     var rev = income ? findItem(income.items, ['营业收入']) : null;
     var cost = income ? findItem(income.items, ['营业成本']) : null;
@@ -295,7 +413,7 @@
       debtGroup.period = balance.period || '';
       var ta = findItem(balance.items, ['资产总计']);
       var tl = findItem(balance.items, ['负债合计']);
-      var eq = findItem(balance.items, ['所有者权益']);
+      var eq = findItem(balance.items, ['所有者权益合计', '股东权益合计', '所有者权益（或股东权益）', '所有者权益', '股东权益']);
       var ca = findItem(balance.items, ['流动资产合计']);
       var cl = findItem(balance.items, ['流动负债合计']);
       var cash = findItem(balance.items, ['货币资金']);
@@ -342,7 +460,7 @@
     if (balance) {
       var ta2 = findItem(balance.items, ['资产总计']);
       var tl2 = findItem(balance.items, ['负债合计']);
-      var eq2 = findItem(balance.items, ['所有者权益']);
+      var eq2 = findItem(balance.items, ['所有者权益合计', '股东权益合计', '所有者权益（或股东权益）', '所有者权益', '股东权益']);
       if (ta2 && tl2 && eq2) {
         var diff = round2(n(ta2.current) - n(tl2.current) - n(eq2.current));
         checks.push({
@@ -398,6 +516,7 @@
       kind: 'finAnalysis',
       title: '财务报表综合分析' + (period ? '（' + period + '）' : ''),
       period: period,
+      unit: unit,
       income: income, balance: balance, cashflow: cashflow,
       unknown: unknown,
       indicators: indicators,
@@ -413,7 +532,7 @@
     var sys = '你是资深财务分析师。基于用户上传的企业财务报表（资产负债表/利润表/现金流量表）解析数据，撰写约 500 字的中文财务分析报告，严格按 4 个固定段落：' +
       '一、总体概览（资产规模、收入、净利润、经营现金流一句话总结）；二、盈利能力与费用（毛利率/净利率/期间费用率，异常原因提示）；' +
       '三、偿债能力与现金流健康度（资产负债率/流动比率/三大活动净额，判断资金安全垫）；四、业务提示与风险（勾稽异常、数据缺口、改进建议）。' +
-      '只依据给定数据客观分析，禁止编造数字或事实；数字保留两位小数；简洁专业。';
+      '只依据给定数据客观分析，禁止编造数字或事实；数字保留两位小数；简洁专业。金额单位以 unit 字段为准（如亿元），展示时注明单位。';
 
     var pick = function (g) {
       return (g || []).map(function (x) {
@@ -422,6 +541,7 @@
     };
     var user = JSON.stringify({
       period: d.period || '',
+      unit: d.unit || '元',
       indicators: (d.indicators || []).map(function (g) { return { group: g.title, items: pick(g.items) }; }),
       checks: d.checks || [],
       alerts: d.alerts || [],
@@ -446,7 +566,7 @@
     var cf = d.indicators ? d.indicators.filter(function (g) { return g.title === '现金流量'; })[0] : null;
     var v = function (g, name) { return g ? (function () { var it = g.items.filter(function (x) { return x.name.indexOf(name) >= 0; })[0]; return it ? it.value : null; })() : null; };
     var rev = v(inc, '营业收入'), netP = v(inc, '净利润'), ta = v(debt, '资产总计'), opNet = v(cf, '经营活动');
-    parts.push('本期' + (d.period || '') + '：营业收入 ' + fmtMoney(rev === null ? 0 : rev) + '，净利润 ' + fmtMoney(netP === null ? 0 : netP) +
+    parts.push('本期' + (d.period || '') + (d.unit && d.unit !== '元' ? '（金额单位：' + d.unit + '）' : '') + '：营业收入 ' + fmtMoney(rev === null ? 0 : rev) + '，净利润 ' + fmtMoney(netP === null ? 0 : netP) +
       '，资产总计 ' + fmtMoney(ta === null ? 0 : ta) + '，经营活动现金流净额 ' + fmtMoney(opNet === null ? 0 : opNet) + '。');
 
     parts.push('二、盈利能力与费用');
